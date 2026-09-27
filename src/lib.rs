@@ -29,28 +29,22 @@
 
 extern crate alloc;
 
+#[cfg(test)]
+extern crate std;
+
+pub mod decomp;
 pub mod error;
 pub mod geom;
 
 pub use error::{InvalidObstacleReason, PathPlanError};
 pub use geom::{BoundingBox, Orientation, Point2D, Polygon};
 
-/// Transcendentals go through `libm` unconditionally rather than behind `cfg(feature = "std")`.
-/// `f64::sqrt`, `sin` and `cos` exist in `core`, but `acos`, `atan2` and `ceil` do not, and a
-/// single code path is worth more here than the marginal dependency cost.
-macro_rules! libm_fn {
-    ($name:ident, $path:path, $($arg:ident),*) => {
-        #[doc = concat!("`", stringify!($name), "`, via `libm`.")]
-        #[inline]
-        pub(crate) fn $name($($arg: f64),*) -> f64 {
-            $path($($arg),*)
-        }
-    };
+/// `sqrt` without `std`.
+///
+/// `f64::sqrt` exists in `core`, but routing it through `libm` unconditionally keeps one numeric
+/// path rather than two that could differ between builds. The angular functions the orthogonal
+/// router will need (`sin`, `cos`, `atan2`) are added with it, for the same reason.
+#[inline]
+pub(crate) fn sqrt(x: f64) -> f64 {
+    libm::sqrt(x)
 }
-
-libm_fn!(sqrt, libm::sqrt, x);
-libm_fn!(sin, libm::sin, x);
-libm_fn!(cos, libm::cos, x);
-libm_fn!(acos, libm::acos, x);
-libm_fn!(atan2, libm::atan2, y, x);
-libm_fn!(ceil, libm::ceil, x);

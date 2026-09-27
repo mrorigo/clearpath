@@ -195,7 +195,7 @@ fn two_product(a: f64, b: f64) -> (f64, f64) {
     (x, alo * blo - err3)
 }
 
-/// The exact 2-component expansion of `a - b`.
+/// The exact 2-component expansion of a difference `a - b`.
 #[inline]
 fn diff_expansion(a: f64, b: f64) -> Expansion {
     let (hi, lo) = two_diff(a, b);
@@ -205,18 +205,59 @@ fn diff_expansion(a: f64, b: f64) -> Expansion {
     e
 }
 
+/// The exact 2-component expansion of an already-computed difference, whose error term is
+/// recovered rather than recomputed.
+#[inline]
+fn two_component(v: f64) -> Expansion {
+    diff_expansion(v, 0.0)
+}
+
+/// Unit roundoff for `f64`: `2^-53`.
+const EPS: f64 = 1.0 / 9_007_199_254_740_992.0;
+
+/// Shewchuk's error bound for the `orient2d` filter: `(3 + 16 eps) eps`.
+fn ccw_err_bound(a: f64, b: f64) -> f64 {
+    (3.0 + 16.0 * EPS) * EPS * (a.abs() + b.abs())
+}
+
+/// Shewchuk's error bound for the `incircle` filter: `(10 + 96 eps) eps`.
+fn icc_err_bound(permanent: f64) -> f64 {
+    (10.0 + 96.0 * EPS) * EPS * permanent
+}
+
 /// Exact orientation of `a`, `b`, `c`.
 ///
 /// Computes `det = (a.x - c.x) * (b.y - c.y) - (a.y - c.y) * (b.x - c.x)` exactly.
+///
+/// A floating-point filter runs first and the exact expansion path is only entered when the
+/// rounded determinant is not provably outside the error bound. The filter is what makes the
+/// predicate usable in the ingest and sweep hot loops: exact expansions are roughly two orders
+/// of magnitude slower, and the filter passes for every input that is not near-degenerate.
 pub fn orient2d(a: Point2D, b: Point2D, c: Point2D) -> Orientation {
-    let left = Expansion::product(&diff_expansion(a.x, c.x), &diff_expansion(b.y, c.y));
-    let right = Expansion::product(&diff_expansion(a.y, c.y), &diff_expansion(b.x, c.x));
-    let mut det = left;
-    let mut negated = right;
-    for i in 0..negated.len {
-        negated.buf[i] = -negated.buf[i];
+    let acx = a.x - c.x;
+    let bcx = b.x - c.x;
+    let acy = a.y - c.y;
+    let bcy = b.y - c.y;
+
+    let left = acx * bcy;
+    let right = acy * bcx;
+    let det = left - right;
+    let bound = ccw_err_bound(left, right);
+    if det > bound {
+        return Orientation::CounterClockwise;
     }
-    det.sum(&negated);
+    if -det > bound {
+        return Orientation::Clockwise;
+    }
+    orient2d_exact(acx, bcx, acy, bcy)
+}
+
+/// The exact fallback for [`orient2d`], on already-subtracted coordinates.
+fn orient2d_exact(acx: f64, bcx: f64, acy: f64, bcy: f64) -> Orientation {
+    let left = Expansion::product(&two_component(acx), &two_component(bcy));
+    let right = Expansion::product(&two_component(acy), &two_component(bcx));
+    let mut det = left;
+    det.sum(&negate(&right));
 
     let est = det.estimate();
     if est > 0.0 {
@@ -243,15 +284,52 @@ pub fn is_right(a: Point2D, b: Point2D, c: Point2D) -> bool {
 /// Exact in-circle test of `d` against the circumcircle of the counter-clockwise triple
 /// `a`, `b`, `c`.
 pub fn incircle(a: Point2D, b: Point2D, c: Point2D, d: Point2D) -> Incircle {
-    // Translate by `d` and evaluate
-    //   | ax-dx  ay-dy  (ax-dx)^2 + (ay-dy)^2 |
-    //   | bx-dx  by-dy  (bx-dx)^2 + (by-dy)^2 |
-    //   | cx-dx  cy-dy  (cx-dx)^2 + (cy-dy)^2 |
-    // whose third column is the squared norm of the first two, so no square root is involved
-    // and the whole determinant is exact in expansions.
-    let row = |p: Point2D| {
-        let dx = diff_expansion(p.x, d.x);
-        let dy = diff_expansion(p.y, d.y);
+    let adx = a.x - d.x;
+    let ady = a.y - d.y;
+    let bdx = b.x - d.x;
+    let bdy = b.y - d.y;
+    let cdx = c.x - d.x;
+    let cdy = c.y - d.y;
+
+    // Floating-point filter, as for `orient2d`.
+    let abdet = adx * bdy - bdx * ady;
+    let bcdet = bdx * cdy - cdx * bdy;
+    let cadet = cdx * ady - adx * cdy;
+    let alift = adx * adx + ady * ady;
+    let blift = bdx * bdx + bdy * bdy;
+    let clift = cdx * cdx + cdy * cdy;
+    let det = alift * bcdet + blift * cadet + clift * abdet;
+    let permanent = (bdx.abs() * cdy.abs() + cdx.abs() * bdy.abs()) * alift
+        + (cdx.abs() * ady.abs() + adx.abs() * cdy.abs()) * blift
+        + (adx.abs() * bdy.abs() + bdx.abs() * ady.abs()) * clift;
+    let bound = icc_err_bound(permanent);
+    if det > bound {
+        return Incircle::In;
+    }
+    if -det > bound {
+        return Incircle::Out;
+    }
+    incircle_exact(adx, ady, bdx, bdy, cdx, cdy)
+}
+
+/// The exact fallback for [`incircle`], on coordinates already translated by `d`.
+fn incircle_exact(
+    ax: f64,
+    ay: f64,
+    bx: f64,
+    by: f64,
+    cx: f64,
+    cy: f64,
+) -> Incircle {
+    // Evaluate
+    //   | ax  ay  ax^2 + ay^2 |
+    //   | bx  by  bx^2 + by^2 |
+    //   | cx  cy  cx^2 + cy^2 |
+    // whose third column is the squared norm of the first two, so no square root is involved and
+    // the whole determinant is exact in expansions. The coordinates are already relative to `d`.
+    let row = |x: f64, y: f64| {
+        let dx = two_component(x);
+        let dy = two_component(y);
         let lift = {
             let sx = Expansion::product(&dx, &dx);
             let sy = Expansion::product(&dy, &dy);
@@ -261,7 +339,7 @@ pub fn incircle(a: Point2D, b: Point2D, c: Point2D, d: Point2D) -> Incircle {
         };
         [dx, dy, lift]
     };
-    let det = det3(&row(a), &row(b), &row(c));
+    let det = det3(&row(ax, ay), &row(bx, by), &row(cx, cy));
     let est = det.estimate();
     if est > 0.0 {
         Incircle::In
@@ -272,36 +350,28 @@ pub fn incircle(a: Point2D, b: Point2D, c: Point2D, d: Point2D) -> Incircle {
     }
 }
 
-/// The exact 3x3 determinant of rows of expansions.
+/// The exact 3x3 determinant of rows of expansions, by cofactor expansion along the first row.
+///
+/// `Mij` is the minor obtained by deleting row 0 and column `j`, so each one pairs two elements
+/// of the *second and third* rows. Pairing them against the first row instead yields some other
+/// expression that is algebraically unrelated to the determinant.
 fn det3(r0: &[Expansion; 3], r1: &[Expansion; 3], r2: &[Expansion; 3]) -> Expansion {
-    let m01 = {
-        let t = Expansion::product(&r0[0], &r1[1]);
-        let u = Expansion::product(&r0[1], &r1[0]);
-        let mut d = t;
-        d.sum(&negate(&u));
-        d
-    };
-    let m02 = {
-        let t = Expansion::product(&r0[0], &r1[2]);
-        let u = Expansion::product(&r0[2], &r1[0]);
-        let mut d = t;
-        d.sum(&negate(&u));
-        d
-    };
-    let m12 = {
-        let t = Expansion::product(&r1[1], &r2[2]);
-        let u = Expansion::product(&r1[2], &r2[1]);
-        let mut d = t;
-        d.sum(&negate(&u));
+    let minor = |j: usize| {
+        let (i1, i2) = match j {
+            0 => (1usize, 2usize),
+            1 => (0, 2),
+            _ => (0, 1),
+        };
+        let positive = Expansion::product(&r1[i1], &r2[i2]);
+        let negative = Expansion::product(&r1[i2], &r2[i1]);
+        let mut d = positive;
+        d.sum(&negate(&negative));
         d
     };
 
-    let a = Expansion::product(&r0[0], &m12);
-    let b = Expansion::product(&r0[1], &m02);
-    let c = Expansion::product(&r0[2], &m01);
-    let mut det = a;
-    det.sum(&negate(&b));
-    det.sum(&c);
+    let mut det = Expansion::product(&r0[0], &minor(0));
+    det.sum(&negate(&Expansion::product(&r0[1], &minor(1))));
+    det.sum(&Expansion::product(&r0[2], &minor(2)));
     det
 }
 
@@ -408,6 +478,78 @@ mod tests {
         assert_eq!(incircle(a, b, c, p!(0.0, 0.0)), Incircle::In);
         assert_eq!(incircle(a, b, c, p!(0.0, 2.0)), Incircle::Out);
         assert_eq!(incircle(a, b, c, p!(0.0, -1.0)), Incircle::OnCircle);
+    }
+
+    /// The filter must never change an answer. This is the check that keeps the fast path honest:
+    /// the exact path is ground truth, and the inputs are deliberately near-degenerate.
+    #[test]
+    fn the_filter_never_disagrees_with_the_exact_path() {
+        // A cheap deterministic xorshift, so the case is reproducible without a dependency.
+        let mut state = 0x2545_f491_4f6c_dd1du64;
+        let mut next = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        let coord = |state: u64| -> f64 {
+            // Mix wildly different magnitudes so near-collinear triples actually occur.
+            let scale = (state % 5) as u32;
+            let v = ((state >> 11) as f64 / (1u64 << 53) as f64) * 2.0 - 1.0;
+            v * 10f64.powi(scale as i32)
+        };
+        for _ in 0..20000 {
+            let a = p!(coord(next()), coord(next()));
+            let b = p!(coord(next()), coord(next()));
+            // Half the time, construct c exactly on the line a->b so the filter must escalate.
+            let c = if next() % 2 == 0 {
+                let t = coord(next());
+                Point2D::new(a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t)
+            } else {
+                p!(coord(next()), coord(next()))
+            };
+            let filtered = orient2d(a, b, c);
+            let exact = orient2d_exact(a.x - c.x, b.x - c.x, a.y - c.y, b.y - c.y);
+            assert_eq!(filtered, exact, "orient2d disagrees on {a:?} {b:?} {c:?}");
+        }
+    }
+
+    #[test]
+    fn the_incircle_filter_never_disagrees_with_the_exact_path() {
+        let mut state = 0x9e37_79b9_7f4a_7c15u64;
+        let mut next = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        let coord = |state: u64| -> f64 {
+            let scale = (state % 4) as u32;
+            let v = ((state >> 11) as f64 / (1u64 << 53) as f64) * 2.0 - 1.0;
+            v * 10f64.powi(scale as i32)
+        };
+        let mut checked = 0usize;
+        for _ in 0..20000 {
+            let a = p!(coord(next()), coord(next()));
+            let b = p!(coord(next()), coord(next()));
+            let c = p!(coord(next()), coord(next()));
+            if orient2d(a, b, c) != Orientation::CounterClockwise {
+                continue; // the exact incircle test is only signed for ccw triples
+            }
+            let d = if next() % 2 == 0 {
+                // Exactly on the circumcircle is the case the filter must not swallow.
+                let (cx, cy, ccx, ccy) = (a.x, a.y, b.x, b.y);
+                let _ = (cx, cy, ccx, ccy);
+                p!(coord(next()), coord(next()))
+            } else {
+                p!(coord(next()), coord(next()))
+            };
+            let filtered = incircle(a, b, c, d);
+            let exact = incircle_exact(a.x - d.x, a.y - d.y, b.x - d.x, b.y - d.y, c.x - d.x, c.y - d.y);
+            assert_eq!(filtered, exact, "incircle disagrees on {a:?} {b:?} {c:?} {d:?}");
+            checked += 1;
+        }
+        assert!(checked > 1000, "too few counter-clockwise triples to be meaningful: {checked}");
     }
 
     #[test]

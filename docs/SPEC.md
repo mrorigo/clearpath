@@ -22,8 +22,7 @@ Where the draft was ambiguous or self-contradictory, the resolution is stated in
 | Corridor | A convex polygon that is a subset of free space and that contains one taut-string segment plus its slack space. |
 | Knot | A vertex of the taut-string path; a Bezier segment is emitted per knot pair. |
 | Eroded workspace | The workspace bounding box shrunk inward by `margin` on all four sides. All routing happens inside it. |
-| Offset obstacle | An obstacle grown outward by `margin` (see §3.3). |
-| Sagitta | Maximum outward error of a polygonal approximation of a circular arc. |
+| Inflated domain | The workspace eroded by `margin` and every obstacle grown by `margin` (§3.3). All planning happens here. |
 
 ---
 
@@ -87,8 +86,8 @@ another; no stage reaches back into an earlier one.
 [workspace bbox + obstacles + margin]
                 |
                 v
-Stage 1a inflate Offset obstacles outward by margin; erode workspace by margin;
-          |  clip  clip each offset obstacle to the eroded workspace (Sutherland-Hodgman)
+Stage 1a margin Erode the workspace by margin; partition each rectilinear
+          |        obstacle into rectangles and grow each by margin
                 v
 Stage 1b decomp Vertical (trapezoidal) sweep decomposition of the eroded free space
           |  -> Vec<Cell> (convex) + cell adjacency + cell location
@@ -147,68 +146,68 @@ part of the public API.
 
 ### 3.3 The margin model
 
-The draft left margin to be re-applied downstream (§4.1 said corridors are free space "eroded by
-margin"; §6.4 implemented it by inflating the taut segment along its normal and clipping). Those
-are different operations and they disagree at corners. **This spec has exactly one margin
-mechanism, applied once at the front of the pipeline:**
+The draft left margin to be re-applied downstream, and its two attempts disagreed (§4.1 said
+corridors are free space "eroded by margin" while §6.4 inflated the taut segment along its normal
+and re-clipped). **This spec applies `margin` exactly once, before anything else looks at the
+geometry:**
 
-> `margin` is a *uniform offset of the whole domain boundary*. The workspace is eroded inward by
-> `margin` on all four sides, and every obstacle is offset outward by `margin`. The
-> decomposition, the funnel, the corridors, and the spline all operate on this **offset domain**,
-> and no stage downstream of Stage 1a applies `margin` again.
+> The forbidden region is the workspace eroded inward by `margin` and every obstacle **grown
+> outward** by `margin`. The decomposition, the funnel, the corridors, and the spline all operate
+> on that inflated domain, and no stage after this one refers to `margin` at all.
 
 Consequences, all intentional:
 
 * A curve is `>= margin` from every obstacle **and** from the workspace boundary. A caller that
-  wants the curve allowed to graze the workspace wall sets `margin = 0`. This is the honest
-  reading of "clearance" and it removes the "does margin apply to the bbox or not" ambiguity.
-* Eroding the workspace means `margin` can exceed the workspace's slack. If the eroded box is
-  empty or has non-positive extent, that is `PathPlanError::WorkspaceEroded`, not a silent clamp
-  and not a silently ignored margin.
-* Obstacles that intersect the workspace border need no special handling: the offset obstacle is
-  clipped to the eroded box, and a clipped offset obstacle with fewer than 3 distinct vertices
-  (fully consumed by the erosion) is discarded — it no longer constrains anything.
-* Clipping is Sutherland–Hodgman against a rectangle. Because the obstacle is simply connected
-  and the clip region is convex, the result is a single (weakly) simple polygon; no hole
-  handling is required.
+  wants the curve to graze the workspace wall sets `margin = 0`.
+* `margin` may exceed the workspace's slack. The eroded box then has no positive extent, the
+  decomposition is empty, and the query reports `NoPathFound` — not a silent clamp, and not a
+  silently ignored margin.
+* Obstacles that no longer reach the eroded workspace are dropped, which is correct: they no longer
+  constrain anything.
+* The erosion does not usually *swallow* an obstacle inside the workspace. An obstacle at distance
+  `$d$` from a wall survives iff `$d \ge 2 \cdot 	ext{margin}$`, so a large margin makes the
+  workspace smaller, not the obstacles.
 
-**Offsetting an obstacle.** For each convex corner of an offset polygon the true offset boundary
-is a circular arc of radius `margin` joined by tangent segments. The implementation emits a
-polygonal approximation:
+**How the growth is realised, and what it costs.** The growth is a **square inflation**, not a
+circular one: an axis-aligned box grown by `margin` is a box, exactly. For a *rectilinear* obstacle
+the model is exact, because
 
-Let `$R = \text{margin} \cdot (1 + \text{SAGITTA\_RATIO})$ be the radius the offset is actually
-built at, and `$\theta$` the interior turn angle at a convex corner.
+$$\bigl\{p : \mathrm{dist}(p,\textstyle\bigcup_i R_i) \ge m\bigr\}
+= \bigcap_i \bigl\{p : \mathrm{dist}(p, R_i) \ge m\bigr\}
+= \mathbb{R}^2 \setminus \bigcup_i \mathrm{outset}(R_i, m)$$
 
-* Each convex corner emits an arc as `n + 1` samples: both tangent points, and the midpoints of
-  the `n` equal sub-arcs between them. The chords are therefore **inscribed**, and the interior of
-  a chord passes at `$R \cos(\theta / 2n)$` from the corner vertex.
-* Arc segment count:
-  `$n = \lceil \theta / (2 \arccos(1 / (1 + \text{SAGITTA\_RATIO}))) \rceil`, capped at
-  `Config::max_arc_segments` (default 64) per corner. Choosing the step from
-  `$\arccos(1/(1+r))$` rather than `$\arccos(1-r)$` is what makes the interior of every chord
-  satisfy `$R \cos(\text{step}/2) \ge \text{margin}$`. The looser bound clears the arc's
-  *endpoints* but not its middle, and would leak up to `margin * r` of clearance at every corner.
-* `SAGITTA_RATIO = 10^{-2}`, which costs six arc segments for a right angle. The bound above is
-  exact rather than approximate, so this is a free parameter: raising it raises the vertex count
-  of every offset obstacle roughly linearly, and lowering it does not improve the guarantee.
-* Reflex corners are **cut back to the intersection of the two neighbouring offset lines**, which
-  is where the boundary of the `margin`-neighbourhood actually runs. Emitting the reflex corner
-  unchanged, or joining its tangent points with a chord, both put the offset boundary closer to
-  the corner than `margin` and break the guarantee. Collinear corners emit their tangent point.
-* `margin == 0` is an exact identity: no vertices are added or moved.
-* A convex arc, a straight offset edge, and a cut-back reflex corner all lie at distance exactly
-  `margin` from the original ring, so every point of the offset boundary is a point of the true
-  `margin`-neighbourhood boundary. The M2 gate tests chord *interiors* as well as samples,
-  because the chord interior is the case a sample-only test would miss.
-* An offset ring that self-intersects — which happens when `margin` is large enough to fill a
-  narrow notch in the obstacle — is `InvalidObstacle` with reason `MarginTooLarge`. It is
-  deliberately *not* dropped: a dropped obstacle is a route straight through it.
-* `margin` must be finite and `>= 0`; otherwise `InvalidConfig`.
-* The erosion does not usually *swallow* an obstacle that sits inside the workspace. An obstacle
-  at distance `$d$` from a wall survives the clip iff `$d \ge 2 \cdot \text{margin}$`, so a large
-  margin makes the workspace smaller, not the obstacles. Only an obstacle that does not reach the
-  eroded workspace at all is dropped.
+where `$R_i$` are disjoint rectangles partitioning the obstacle. The pieces need not compose — only
+their complements do — so a rectilinear obstacle is partitioned into rectangles by a scanline
+(`geom::polygon::rectilinear_rectangles`) and each is grown independently. Overlapping and nested
+obstacles need no special handling at all, because the sweep's free-space test is a point-in-box
+test over the grown boxes.
 
+Square rather than round inflation is conservative in the corner directions only: a point at true
+distance `margin` from a corner along the diagonal is excluded, so the realised clearance is
+`>= margin` everywhere and the free space is at most `margin (\sqrt{2} - 1)` smaller than optimal
+near each corner. The guarantee is one-sided by design, and the M3 gate asserts the one-sided form.
+
+**A nonzero `margin` against a non-rectilinear obstacle is rejected**, with
+[`PathPlanError::MarginUnsupportedGeometry`]. This is deliberate and is the one v1 limitation in the
+margin model:
+
+* Growing a general polygon's boundary requires the offset features to be **trimmed against each
+  other** — where one feature's offset is cut off because another feature's offset covers it. An
+  untrimmed offset is not a conservative approximation, it is simply wrong: a `margin` large
+  relative to a notch produces a boundary that runs *through* the obstacle it came from, and a
+  `margin` relative to two nearby features produces a ring that is not simple at all. Measured on
+  a comb-shaped obstacle, the untrimmed construction put offset boundary points at zero distance
+  from the obstacle on 854 sampled positions.
+* The alternatives were considered and rejected. Eroding the *decomposition cells* instead does not
+  work either, and for a less obvious reason worth recording: a cell's own faces do not account for
+  an obstacle feature just beyond one of its portals, so a cell can sit arbitrarily close to an
+  obstacle it does not touch, and the eroded region is then not even convex.
+* Reporting the error is the only option that cannot produce a collision. Silently dropping the
+  obstacle would route straight through it.
+
+`margin == 0` is exact for every polygon and is the identity operation.
+
+`margin` must be finite and `>= 0`; otherwise `InvalidConfig`.
 
 ---
 
@@ -226,7 +225,7 @@ ensures this by construction, in two steps:
 
 By the convex-hull property of cubic Beziers, (1) implies the whole curve lies in the corridor;
 by construction of the corridors from the decomposition cells, (2) implies the clearance. Since
-`margin` is applied exactly once, at Stage 1a, no stage can "forget" it. **Sampling is a test
+`margin` is applied exactly once, before the decomposition, no stage can forget it. **Sampling is a test
 strategy, not the guarantee** (see §9).
 
 ### 4.1a Required lemma (decomposition)
@@ -362,9 +361,7 @@ pathplan/
       point.rs        # Point2D, Vec2 ops, Segment
       polygon.rs      # Polygon, BoundingBox, robust winding test
       predicates.rs   # exact orient2d, incircle, expansions
-      inflate.rs      # section 3.3 obstacle offset + workspace erosion
-      clip.rs         # Sutherland-Hodgman against a rectangle
-    decomp/           # free-space decomposition (replaces the draft's `cdt/`)
+      decomp/           # free-space decomposition (replaces the draft's `cdt/`)
       mod.rs
       cell.rs         # convex Cell, Portal, cell adjacency
       sweep.rs        # vertical decomposition sweep
@@ -405,9 +402,9 @@ pathplan/
 * `predicates::orient2d(a, b, c) -> Orientation` where
   `Orientation::{Clockwise, CounterClockwise, Collinear}`, exact per §3.1.
 * `predicates::incircle(a, b, c, d) -> Incircle` (`In`, `Out`, `OnCircle`).
-* `Polygon` provides `winding_number_contains(p) -> bool` via a robust crossing count; the
-  `on-boundary` case returns `true` (a point exactly on the boundary is treated as inside, so
-  endpoints may never sit on an obstacle).
+* `Polygon::contains(p)` is a robust crossing count; the `on-boundary` case returns `true` (a point
+  exactly on the boundary is treated as inside, so endpoints may never sit on an obstacle).
+* `Rect`, `is_rectilinear` and `rectilinear_rectangles` support the margin model (§3.3).
 
 **Resolution.** `Polygon` is wound counter-clockwise and the header comment says so; the draft
 also implied this in a type comment. Rings with repeated consecutive vertices, zero-length edges,
@@ -762,8 +759,9 @@ pub enum PathPlanError {
     #[error("workspace bounds are empty or inverted")]
     DegenerateWorkspace,
 
-    #[error("margin {margin} erases the workspace (nothing left to route in)")]
-    WorkspaceEroded { margin: f64 },
+
+    #[error("margin {margin} requires rectilinear obstacles (axis-aligned edges only)")]
+    MarginUnsupportedGeometry { margin: f64 },
 
     #[error("invalid obstacle: {reason:?}")]
     InvalidObstacle { reason: InvalidObstacleReason },
@@ -785,14 +783,13 @@ pub enum InvalidObstacleReason {
     NaNOrInfinite,      // any coordinate is not finite
     SelfIntersecting,   // a non-adjacent edge pair crosses
     DegenerateArea,     // zero total enclosed area
-    MarginTooLarge,     // the offset ring self-intersects; the margin fills a narrow notch
 }
 ```
 
 **Resolution.** The draft's `InvalidObstacle(String)` allocated in a `no_std` crate and was not
 matchable in tests; the fieldless enum is not.
 
-`ConstraintEdgesCross` and `OutsideWorkspace` from my earlier draft are **removed**: the first
+`WorkspaceEroded` and `MarginTooLarge` from my earlier draft are **removed**: the first
 became unnecessary when Stage 1 stopped needing non-crossing constraints (section 6.2), and the
 second was wrong — an obstacle may extend arbitrarily far outside the workspace, because
 section 3.3 clips the *offset* obstacle to the eroded workspace. Only a non-finite, degenerate,
@@ -831,6 +828,13 @@ section 6.1. It is not a post-processing of the smooth route.
 2. **Latency.** Warm query, 10–50 axis-aligned box obstacles, `margin = 1.0`, start/goal
    forcing 2–4 spline segments: **< 50 microseconds** median on a modern x86_64 or aarch64
    core, measured by Criterion with `--warm-up-time 1`.
+   *Status: **not met, and the target is not currently achievable.** Measured decomposition-only
+   cost (Stages 1a+1b, the whole of M3) on an aarch64 core, 100x100 workspace, boxes on a lattice:
+   10 boxes 74 us, 50 boxes 227 us, at either `margin` 0 or 1. The margin is now nearly free
+   because square inflation adds no vertices; the cost is the sweep, which is `O(events x edges)`.
+   The end-to-end figure will be worse. The target is retained as the goal and the implementation
+   is expected to need a sweep with an incrementally maintained active-edge list before it can be
+   approached; `tests/scale.rs` prints the current figures so the gap stays visible.
 3. **Benchmarks.**
    * End-to-end `route_smooth` at N = 10/50/200 boxes.
    * Stage 1 cost split: `inflate`+`clip` vs. `sweep` vs. cell location.
@@ -852,7 +856,7 @@ the section 4 invariants, not the source of the guarantee.
 
 | Gate | Property | Test |
 | --- | --- | --- |
-| M3 | L1: cells convex, disjoint interiors, union = offset free space | exhaustive on a 60x60 sample grid vs. a direct free-space predicate, for all small random inputs with <= 6 obstacles |
+| M3 | L1: cells convex, disjoint interiors, union = the inflated free space; plus the one-sided margin property on cell boundaries and chord interiors | `tests/decomposition.rs`: 200x200 probe grid against an independent free-space predicate, for 15 hand-built fixtures and 24 random box fields |
 | M4 | L2: every funnel output point is inside some corridor cell | 9.1's containment check, restricted to the returned corridor |
 | M5 | each corridor is convex and contained in the offset free space | exact `orient2d` against every offset obstacle edge |
 | M6 | section 4.1-4.3 | 9.1, 9.3, 9.4, 9.5 |
@@ -863,13 +867,14 @@ the section 4 invariants, not the source of the guarantee.
   random `start`/`goal` (rejection-sampled against the offset domain, not the raw one), and
   random `margin \in [0, 2]`.
 * Assert `route_smooth` returns `Ok` **or** one of `NoPathFound` / `EndpointInObstacle` /
-  `EndpointOutsideWorkspace` / `WorkspaceEroded` / `InvalidObstacle`. Never a panic, never an
+  `EndpointOutsideWorkspace` / `InvalidObstacle` / `MarginUnsupportedGeometry`. Never a panic, never an
   undocumented variant.
 * Collision check: flatten every segment with tolerance `1e-3` **and** independently sample at
-  `dt = 0.005`; assert every sample point is outside every obstacle *by at least*
-  `margin * 0.99`, and inside the workspace eroded by `margin * 0.99`. The `1%` slack absorbs
-  the arc-tessellation of section 3.3 and `f64` distance rounding (section 3.1); the sharper
-  `margin - 1e-9` check is not meaningful once `margin` is realised by an arc approximation.
+  `dt = 0.005`; assert every sample point is outside every obstacle *by at least* `margin` minus
+  `1e-9`, and inside the workspace eroded by `margin` minus `1e-9`. No percentage slack is needed
+  now that the margin is realised by exact square inflation rather than an arc approximation; the
+  `1e-9` absorbs `f64` distance rounding only. Inputs with a non-rectilinear obstacle and a
+  nonzero `margin` are excluded, since that is `MarginUnsupportedGeometry` rather than a route.
 * Additionally assert, for the same input, that **the exact containment condition of section
   4.1 holds**: `k_i \pm T_i/3` lies in the admissible set of section 4.6. This is the check that
   has no tolerance at all, and it is what makes the sampled check trustworthy.
@@ -881,6 +886,10 @@ collinear with the workspace bbox, and `margin` large enough to merge obstacles 
 no panic, and the result is `Ok` or a documented error. The draft's "without returning an error"
 is not achievable — genuinely sealed boxes must produce `NoPathFound`, and asserting otherwise
 would force the implementation to lie.
+
+Also assert the *one-sided* margin property directly and with no tolerance ladder: for every point
+of every cell boundary, and of every chord between consecutive boundary points, the distance to
+every obstacle ring is `>= margin`.
 
 ### 9.3 Straight-line reduction
 
@@ -983,6 +992,9 @@ product question, one undecided algorithm) and closed them.
 | 27f | **`OutsideWorkspace` / `ConstraintEdgesCross` errors** | Both became wrong or unnecessary once `margin` was applied at ingest and Stage 1 stopped needing crossing-free constraints | Removed from the error enum, with the reason stated (§7.1) |
 | 28 | `#![forbid]` at the root plus `#![allow]` in a module | Not compilable: an inner `allow` cannot override an outer `forbid` | §4.5 uses `deny` plus the CI grep gate |
 | 29 | Arc bound `2 arccos(1 - r)` | Guarantees the arc's *endpoints* clear the margin, not the interior of each chord, which passes at `R cos(step/2)` — up to `margin * r` too close at every corner. Found by the M2 chord-interior test | §3.3: `2 arccos(1/(1+r))`, and the ratio raised to `1e-2` now that the bound is exact rather than approximate |
-| 30 | `InvalidObstacleReason` had no variant for "the offset ring self-intersects" | The only options were to drop the obstacle — which is a route through it — or to add a variant | `MarginTooLarge` added (§7.1) |
+| 30 | `InvalidObstacleReason` had no variant for "the offset ring self-intersects" | The only options were to drop the obstacle — which is a route through it — or to add a variant | `MarginTooLarge` added, then removed again once §3.3 stopped needing offsets (A.32, A.33) |
 | 31 | §3.3 claimed the erosion "swallows" obstacles near a wall | It does not: an obstacle at distance `d` survives iff `d >= 2 * margin` | §3.3 states the actual condition; a regression test pins it |
+| 32 | §3.3's original "offset each obstacle by `margin`, approximating convex corners with arcs" | **Unsound.** The offset boundary of a *reflex* corner is not the crossing of the two offset lines and not an arc about the vertex, and the failure is not a small inaccuracy: on a comb-shaped obstacle the construction put offset-boundary points at zero distance from the obstacle on 854 sampled positions, and whether it failed was non-monotone in `margin` (0.4, 0.5 and 0.6 failed while 0.8 and 1.0 succeeded). Silently violating the clearance is the worst failure mode in the whole crate | §3.3 rewritten: the growth is a **square inflation** applied to a rectilinear partition of each obstacle, which is exact. A nonzero `margin` against a non-rectilinear obstacle is now a reported error rather than a wrong answer. The alternatives (eroding cells; trimming offsets) are recorded in §3.3 with the reason each fails |
+| 33 | §7.1's `MarginTooLarge` and `WorkspaceEroded` variants | Both existed only to paper over the offsetting failures; with exact square inflation neither condition can arise | Removed, with the reason stated (§7.1) |
+| 34 | §8.2's "< 50 us" target | Not met, and the measurement is recorded rather than the target quietly dropped | §8.2 now carries the measured decomposition cost (74 us at 10 boxes, 227 us at 50) and names the optimisation the target depends on |
 

@@ -100,10 +100,12 @@ impl Polygon {
                 return Err(Self::err(InvalidObstacleReason::ZeroLengthEdge));
             }
         }
-        let distinct = deduped_len(&vertices);
-        if distinct < 3 {
+        if vertices.len() < 3 {
             return Err(Self::err(InvalidObstacleReason::TooFewVertices));
         }
+        // One pass for the duplicate check. The order of the checks below is the order in which
+        // they are most informative: a bowtie has zero signed area *and* self-intersects, and
+        // "self-intersecting" is the diagnosis a caller can act on.
         for i in 0..vertices.len() {
             for j in (i + 1)..vertices.len() {
                 if vertices[i] == vertices[j] {
@@ -111,13 +113,17 @@ impl Polygon {
                 }
             }
         }
-        if is_self_intersecting(&vertices) {
+        // A convex ring cannot self-intersect, and the `O(n^2)` check is the dominant ingest cost
+        // for an offset obstacle, so it is skipped when convexity already answers it. The offset
+        // of a convex obstacle is convex, which is the common case by far.
+        if !is_convex_ring(&vertices) && is_self_intersecting(&vertices) {
             return Err(Self::err(InvalidObstacleReason::SelfIntersecting));
         }
-        if signed_area(&vertices) == 0.0 {
+        let area = signed_area(&vertices);
+        if area == 0.0 {
             return Err(Self::err(InvalidObstacleReason::DegenerateArea));
         }
-        if signed_area(&vertices) < 0.0 {
+        if area < 0.0 {
             vertices.reverse();
         }
         Ok(Self { vertices })
@@ -234,18 +240,35 @@ fn signed_area(vertices: &[Point2D]) -> f64 {
 fn deduped_len(vertices: &[Point2D]) -> usize {
     let mut n = 0usize;
     for i in 0..vertices.len() {
-        let mut seen = false;
-        for j in 0..i {
-            if vertices[i] == vertices[j] {
-                seen = true;
-                break;
-            }
-        }
-        if !seen {
+        if !vertices[..i].contains(&vertices[i]) {
             n += 1;
         }
     }
     n
+}
+
+/// Whether every interior angle of the ring turns the same way, i.e. the ring is convex (possibly
+/// with collinear runs). `O(n)`.
+fn is_convex_ring(vertices: &[Point2D]) -> bool {
+    let n = vertices.len();
+    if n < 4 {
+        return true;
+    }
+    let mut sign = 0i8;
+    for i in 0..n {
+        let o = orient2d(vertices[i], vertices[(i + 1) % n], vertices[(i + 2) % n]);
+        let s = match o {
+            Orientation::Clockwise => -1,
+            Orientation::CounterClockwise => 1,
+            Orientation::Collinear => continue,
+        };
+        if sign == 0 {
+            sign = s;
+        } else if sign != s {
+            return false;
+        }
+    }
+    true
 }
 
 /// Whether any two non-adjacent edges of the ring cross, or any non-adjacent pair of edges shares
@@ -467,4 +490,112 @@ mod tests {
         let b = BoundingBox { min: Point2D::new(1.0, 1.0), max: Point2D::new(1.0, 5.0) };
         assert!(b.is_degenerate());
     }
+}
+
+/// An axis-aligned rectangle.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Rect {
+    /// Lower-left corner, inclusive.
+    pub min: Point2D,
+    /// Upper-right corner, inclusive.
+    pub max: Point2D,
+}
+
+impl Rect {
+    /// Whether the rectangle has positive extent in both axes.
+    #[inline]
+    pub fn is_degenerate(&self) -> bool {
+        !(self.max.x > self.min.x && self.max.y > self.min.y)
+    }
+
+    /// The rectangle grown outward by `d` on all four sides.
+    ///
+    /// This — not the inset — is what a `margin` needs: the forbidden region is the obstacle
+    /// grown by `margin`, so that a point outside it is at least `margin` from the obstacle. For an
+    /// axis-aligned rectangle the outset is exact, with no arc approximation anywhere.
+    pub fn outset(&self, d: f64) -> Self {
+        Rect {
+            min: Point2D::new(self.min.x - d, self.min.y - d),
+            max: Point2D::new(self.max.x + d, self.max.y + d),
+        }
+    }
+
+    /// The four corners, counter-clockwise.
+    pub fn corners(&self) -> [Point2D; 4] {
+        [
+            self.min,
+            Point2D::new(self.max.x, self.min.y),
+            self.max,
+            Point2D::new(self.min.x, self.max.y),
+        ]
+    }
+}
+
+/// Whether every edge of the ring is axis-aligned.
+pub fn is_rectilinear(vertices: &[Point2D]) -> bool {
+    vertices.iter().enumerate().all(|(i, a)| {
+        let b = vertices[(i + 1) % vertices.len()];
+        a.x == b.x || a.y == b.y
+    })
+}
+
+/// Partitions a rectilinear ring into axis-aligned rectangles with disjoint interiors, or `None`
+/// if the ring is not rectilinear.
+///
+/// Why this exists: the `margin` model needs the set `{p : dist(p, obstacle) >= margin}`, and for
+/// a rectilinear obstacle that set is exactly the complement of the union of the *outsets* of the
+/// rectangles. It works out because `dist(p, union) = min over parts`, so
+/// `dist(p, union) >= m` is the intersection over parts of `dist(p, part) >= m`, which is the
+/// complement of the union of the outsets — the pieces do not have to compose, only their
+/// complements do. For a *general* polygon there is no such decomposition, and growing the ring
+/// itself requires trimming offset features against each other, which is not implemented. See
+/// `docs/SPEC.md` section 3.3.
+///
+/// A scanline suffices and is exact: every edge is axis-aligned, so the distinct vertex
+/// abscissae bound bands in which the set of interior x-intervals cannot change, and a probe at a
+/// band's mid-abscissa classifies it unambiguously.
+pub fn rectilinear_rectangles(vertices: &[Point2D]) -> Option<Vec<Rect>> {
+    if !is_rectilinear(vertices) {
+        return None;
+    }
+    let mut ys: Vec<f64> = vertices.iter().map(|p| p.y).collect();
+    sort_f64_unique(&mut ys);
+    let _ = &ys;
+    if ys.len() < 2 {
+        return None;
+    }
+    let mut rects: Vec<Rect> = Vec::with_capacity(vertices.len());
+    for window in ys.windows(2) {
+        let (lo, hi) = (window[0], window[1]);
+        let mid = 0.5 * (lo + hi);
+        // Interior x-intervals of the ring at height `mid`, by crossing count.
+        let mut crossings: Vec<f64> = Vec::new();
+        for i in 0..vertices.len() {
+            let a = vertices[i];
+            let b = vertices[(i + 1) % vertices.len()];
+            if a.x == b.x && a.y != b.y {
+                let (low, high) = (a.y.min(b.y), a.y.max(b.y));
+                if mid >= low && mid < high {
+                    crossings.push(a.x);
+                }
+            }
+        }
+        crossings.sort_by(|p, q| {
+            if p < q { core::cmp::Ordering::Less } else { core::cmp::Ordering::Greater }
+        });
+        for pair in crossings.chunks_exact(2) {
+            let rect = Rect { min: Point2D::new(pair[0], lo), max: Point2D::new(pair[1], hi) };
+            if !rect.is_degenerate() {
+                rects.push(rect);
+            }
+        }
+    }
+    Some(rects)
+}
+
+fn sort_f64_unique(values: &mut Vec<f64>) {
+    values.sort_by(|a, b| {
+        if a < b { core::cmp::Ordering::Less } else { core::cmp::Ordering::Greater }
+    });
+    values.dedup();
 }

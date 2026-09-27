@@ -20,9 +20,6 @@ pub enum InvalidObstacleReason {
     SelfIntersecting,
     /// The ring encloses zero area.
     DegenerateArea,
-    /// The requested margin is too large for this obstacle: its offset ring self-intersects
-    /// because the margin fills a narrow notch in the obstacle.
-    MarginTooLarge,
 }
 
 /// Everything that can go wrong during a route query.
@@ -45,11 +42,18 @@ pub enum PathPlanError {
     NoPathFound,
     /// The workspace bounding box is empty or inverted.
     DegenerateWorkspace,
-    /// The requested margin is larger than the workspace, leaving nothing to route in.
-    WorkspaceEroded {
+    /// A nonzero `margin` was requested with an obstacle that is not rectilinear.
+    ///
+    /// The `margin` model is exact for rectilinear geometry and is deliberately not approximated
+    /// for anything else: realising a margin on a general polygon needs the obstacle's offset
+    /// boundary trimmed against itself, and an untrimmed approximation produces geometry that
+    /// passes within `margin` of the very obstacle it came from. A nonzero margin with a
+    /// non-rectilinear obstacle is reported instead. See `docs/SPEC.md` section 3.3.
+    MarginUnsupportedGeometry {
         /// The margin that was requested.
         margin: f64,
     },
+
     /// An obstacle polygon was malformed.
     InvalidObstacle {
         /// Why it was rejected.
@@ -71,9 +75,10 @@ impl fmt::Display for PathPlanError {
             Self::DegenerateEndpoints => write!(f, "start and goal are the same point"),
             Self::NoPathFound => write!(f, "no feasible path exists between start and goal"),
             Self::DegenerateWorkspace => write!(f, "workspace bounds are empty or inverted"),
-            Self::WorkspaceEroded { margin } => {
-                write!(f, "margin {margin} leaves no workspace to route in")
-            }
+            Self::MarginUnsupportedGeometry { margin } => write!(
+                f,
+                "margin {margin} requires rectilinear obstacles (axis-aligned edges only)"
+            ),
             Self::InvalidObstacle { reason } => write!(f, "invalid obstacle: {reason:?}"),
             Self::InvalidConfig(why) => write!(f, "invalid configuration: {why}"),
         }
