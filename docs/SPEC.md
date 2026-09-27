@@ -7,7 +7,8 @@ Where the draft was ambiguous or self-contradictory, the resolution is stated in
 **Crate:** `clearpath`
 **License:** MIT OR Apache-2.0
 **Edition:** Rust 2024 (single edition; the draft's "2024 / 2021" is dropped — `Cargo.toml` pins 2024).
-**Target:** `#![no_std]` + `alloc` core. Optional `std` and `simd` features.
+**Target:** `#![no_std]` + `alloc` core, with an optional `std` feature. No `unsafe` anywhere,
+and no feature that would introduce some.
 
 **Terminology used throughout**
 
@@ -274,7 +275,8 @@ is renamed *Straight-line reduction*.
 ### 4.4 Determinism
 
 Two tiers, because the draft's "bitwise identical across all supported architectures" is not
-achievable alongside the SIMD feature and is contradicted by it:
+achievable only if nothing else is allowed to change the arithmetic — in particular not by
+vectorising it:
 
 * **D1 — Semantic determinism (portable).** For identical inputs, the planner produces the same
   sequence of knots, the same cell assignment, the same classification of every query point, and
@@ -288,24 +290,31 @@ To make D2 hold:
 * No reliance on iteration order of hash containers; all maps are sorted `Vec`s or `BTreeMap`s.
 * No reliance on pointer or address values in any output or branch.
 * No thread or task scheduling influence on query execution (one query runs on one thread).
-* `simd`-gated kernels must produce results identical to the scalar path; they may only change
-  throughput. A test asserts `cfg(feature = "simd")` outputs equal the scalar outputs bitwise.
+* There is no `unsafe` and therefore no vectorised path to disagree with: §4.5 removes the only
+  mechanism by which a different instruction sequence could change a result.
 
 **Cross-architecture bitwise equality of `f64` outputs is explicitly not a goal** and is not
-tested. FMA contraction is disabled for the crate's numerics modules via
-`#[allow]`-free opt-out where the toolchain permits; where it cannot be disabled, the affected
-kernels are kept in the scalar path.
+tested. Nothing in the crate vectorises (§4.5), so the only way to get a different instruction
+sequence out of the compiler is its own contraction choices, and `#![deny(unsafe_code)]` means a
+vectorised fallback is not available to reintroduce one.
 
 ### 4.5 Unsafe code
 
-`#![deny(unsafe_code)]` at the crate root, and `#![allow(unsafe_code)]` inside `spline::simd`
-only. Note this is `deny`, not `forbid`: an inner `allow` **cannot** override an outer `forbid`,
-so the draft's pairing was not compilable. `deny` plus the CI grep (section 9.7) gives the same
-practical guarantee.
+**The crate contains no `unsafe` at all.** `#![deny(unsafe_code)]` at the root, and no local
+`#[allow(unsafe_code)]` anywhere: there is nothing to allow, and a single exception is how a
+"one audited file" policy becomes an unbounded one. CI greps `src/` for `unsafe` in code positions
+*and* for the attribute itself, so the invariant is checked rather than assumed (§10).
 
-`geom::predicates` needs no `unsafe` at all. Its exact product is Dekker split-and-multiply over
-`f64`, not `f64::mul_add`, because `mul_add` is only in `core` when the target has a hardware FMA
-— relying on it would make the predicate silently target-dependent, which section 4.4 forbids.
+Two consequences worth recording, because both were the original reasons for wanting an escape
+hatch:
+
+* `geom::predicates` needs no `unsafe`. Its exact product is Dekker split-and-multiply over `f64`,
+  not `f64::mul_add`, because `mul_add` is only in `core` when the target has a hardware FMA —
+  relying on it would make the predicate silently target-dependent, which §4.4 forbids.
+* There is no vectorised path that could disagree with the scalar one, which was the largest threat
+  to the D2 guarantee. A batched kernel using FMA contraction would break §4.4 quietly, and the fix
+  — disabling contraction — is the kind of caveat that erodes. Removing the capability removed the
+  risk rather than documenting it.
 
 ### 4.6 Shared-tangent clamping
 
@@ -372,7 +381,6 @@ clearpath/
       bezier.rs       # CubicBezierSegment, evaluation, flattening
       solver.rs       # tridiagonal solve (Thomas), C1/C2 tangent systems
       containment.rs  # corridor containment, repair, de Casteljau
-      simd.rs         # feature = "simd"; the only unsafe in the crate
     router/
       mod.rs
       smooth.rs       # stages 1-4 orchestration
@@ -653,13 +661,6 @@ for i in 0..n: T[i] = project_onto_convex(A[i], T[i])
 * Defaults: `max_repair_iters = 16`, `repair_dampening = 0.5`, `tangent_bias = 1.0`. `Config::validate`
   reports each out-of-range field.
 
-
-### 6.6 `spline::simd` (feature `simd`)
-
-Optional. Contiguous-batch cubic evaluation and flattening over `&[CubicBezierSegment]`.
-Must be bitwise-equal to the scalar path (§4.4). The module is the crate's only `unsafe`.
-
----
 
 ## 7. Public API
 
@@ -964,7 +965,7 @@ and that is the case the margin exists for. The property tests caught it on the 
 
 ### 8.3 Benchmarks
 
-`benches/route.rs`, five groups:
+`benches/route.rs`, four groups:
 
 * `route_smooth` — end to end at 10/50/200 boxes, margin 0 and 1, fresh planner each iteration so
   the corpus is proved routable first.
@@ -973,8 +974,6 @@ and that is the case the margin exists for. The property tests caught it on the 
   have sent the optimisation pass to the sweep, which was 6% of the query.
 * `warm` — a planner that has already run, which is the figure section 8.2 names.
 * `route_orthogonal` — the rectilinear router at 10 and 50 boxes.
-* A scalar-versus-SIMD group, deferred until `spline::simd` exists. It is listed here so its
-  absence is a recorded decision rather than an oversight.
 
 ---
 
@@ -1047,13 +1046,15 @@ the sampling in 9.1 is a cross-check against it.
 ### 9.6 Determinism
 
 For a fixed corpus: 200 runs of the same request produce bit-identical output (D2), and the
-`scalar` and `simd` builds produce bit-identical output (when `simd` is enabled).
+repeated builds produce bit-identical output.
 
 ### 9.7 `no_std` and unsafe
 
 * `cargo build --no-default-features --target thumbv7em-none-eabihf` (or
   `aarch64-unknown-none`) must succeed.
-* A CI job greps for `unsafe` and fails unless every hit is under `src/spline/simd.rs`.
+* A CI check greps `src/` for `unsafe` in code positions and for `#[allow(unsafe_code)]`, and
+  fails on either. `#![deny(unsafe_code)]` already enforces this at compile time; the check exists
+  so the invariant is stated where someone will look for it.
 
 ### 9.8 Orthogonal router
 
@@ -1075,10 +1076,8 @@ segment is zero length, that every point of every leg is in the free space, that
   is installed. The crate is `#![no_std]` unconditionally; the feature only drops the `std`
   dependency.
 * `cargo clippy --all-targets --all-features -- -D warnings` is clean.
-* `unsafe` appears only in `src/spline/simd.rs`, and only under an explicit
-  `#![allow(unsafe_code)]`. Enforced by a grep for `unsafe` in code positions, because
-  `#![deny(unsafe_code)]` cannot express "allowed in exactly one file", and by a grep that would
-  also fire on a doc comment merely naming it.
+* `src/` contains no `unsafe` and no `#[allow(unsafe_code)]`. There is no feature that would
+  introduce some.
 * `cargo test --all-features` passes.
 * **The test suite is run six times.** The property tests reseed on every run, and two of the bugs
   found during development (a topological check standing in for a metric one, and a rectilinear
@@ -1105,8 +1104,8 @@ product question, one undecided algorithm) and closed them.
 | 2 | `margin`; safety `>= 0` | `>= 0` is vacuously true for any curve outside the polygon | §4.1: distance to obstacle boundary `>= margin`, guaranteed via corridors |
 | 3 | `$C^1$` written as `$S_k'(1) = \alpha S_{k+1}'(0)$ | That is `$G^1$`; contradicts the stated `$C^1$` | §4.2: exact vector equality; direction-only ports are rescaled |
 | 4 | "Monotonic Convergence" | No iteration exists to converge | Renamed *Straight-line reduction* (§4.3) |
-| 5 | "bitwise identical across all architectures" | Contradicts SIMD and FMA | Split into D1/D2 (§4.4) |
-| 6 | "zero unsafe outside SIMD" vs. exact predicates | Unclear whether predicates need `unsafe` | §4.5: they don't; `forbid` + one `allow` site |
+| 5 | "bitwise identical across all architectures" | Contradicts vectorised paths and FMA | Split into D1/D2 (§4.4) |
+| 6 | "zero unsafe outside SIMD" vs. exact predicates | Unclear whether predicates need `unsafe` | §4.5: they don't, and the escape hatch went with them — the crate now has no `unsafe` at all |e `allow` site |
 | 7 | `PathPlanError::InvalidObstacle(String)` | Allocates in `no_std`; untestable | Fieldless reason enum (§7.1) |
 | 8 | `Vec` used unqualified in a `no_std` API sketch | Missing `alloc` | `extern crate alloc` + re-export (§7) |
 | 9 | A* "metric is centroids **or** edge midpoints" | Undefined choice | Centroids + admissibility proof (§6.3a) |
@@ -1186,8 +1185,16 @@ analytic containment proofs, and the optimisation pass. What is in it:
 * `no_std` + `alloc`, with `unsafe` confined to a module that does not exist yet (§4.5).
 
 What is deliberately not in it, and why: incremental decomposition, global optimality across
-homotopy classes, `simd` kernels, and allocation-free queries. Each is a scope decision recorded
-above rather than an omission.
+homotopy classes, vectorised kernels, and allocation-free queries. Each is a scope decision
+recorded above rather than an omission.
+
+The one that was measured rather than assumed: a `simd` feature was carried from the start, on the
+expectation that batched kernels would pay. They do not. Batched cubic evaluation is ~1.4 ns per
+call and is not on the planner's path at all; a batched point-to-segment distance is ~11 ns and
+every call already sits behind a four-comparison bounding-box reject. The time the planner does
+spend is in adaptive exact predicates, which have both data dependencies and an early-exit
+escalation and cannot be vectorised. So the feature was removed rather than implemented: it would
+have cost a permanent `unsafe` surface and a collision with the D2 guarantee for no measurable gain.
 
 The measurement that shaped this version is in §8: the pipeline is roughly 4x faster than its first
 working form, and at 10 obstacles it is comfortably inside the latency target the specification

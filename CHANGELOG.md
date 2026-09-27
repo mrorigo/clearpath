@@ -25,7 +25,8 @@ First release. Named `clearpath`; the crate was developed as `pathplan`, after G
 - `PortConstraint` for a forced departure or arrival direction, honoured when it is admissible and
   projected when it is not.
 - `CubicBezierSegment::flatten` and `split` (de Casteljau), for sampling and hit-testing a curve.
-- `no_std` + `alloc`; `unsafe` is confined to `spline::simd`, which does not exist yet.
+- `no_std` + `alloc`, with no `unsafe` anywhere in the crate and no lint suppression to
+  allow it.
 
 ### Known limitations
 

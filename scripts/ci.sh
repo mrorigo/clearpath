@@ -32,19 +32,20 @@ cargo clippy --all-targets --all-features -- -D warnings
 pass "clippy -D warnings"
 
 echo "==> unsafe containment"
-# Only the SIMD module may contain `unsafe`, and only under an explicit allow. The grep is for
-# `unsafe` in *code* positions: a doc comment that merely names `unsafe` is not a violation, and
-# matching one would make the gate cry wolf.
-violations="$(grep -rnE --include='*.rs' '(unsafe[[:space:]]*\{|unsafe[[:space:]]+(fn|impl|trait|extern))' src/ \
-    | grep -v '^src/spline/simd.rs:' || true)"
+# The crate contains no `unsafe` at all. `#![deny(unsafe_code)]` already enforces that, and this
+# check makes the claim explicit and greppable rather than implied -- and it fails if anyone later
+# adds a local `#[allow(unsafe_code)]`, which is how a single-exception policy tends to creep back.
+# The grep is for `unsafe` in code positions: a doc comment that merely names it is not a finding.
+violations="$(grep -rnE --include='*.rs' '(unsafe[[:space:]]*\{|unsafe[[:space:]]+(fn|impl|trait|extern))' src/ || true)"
 if [ -n "$violations" ]; then
     echo "$violations" >&2
-    fail "unsafe outside src/spline/simd.rs"
+    fail "unsafe code in src/"
 fi
-if [ -f src/spline/simd.rs ] && ! grep -q 'allow(unsafe_code)' src/spline/simd.rs; then
-    fail "src/spline/simd.rs has no #![allow(unsafe_code)]"
+if grep -rn --include='*.rs' 'allow(unsafe_code)' src/ >/dev/null; then
+    grep -rn --include='*.rs' 'allow(unsafe_code)' src/ >&2
+    fail "an allow(unsafe_code) was added; the crate is meant to need none"
 fi
-pass "no unsafe outside src/spline/simd.rs"
+pass "no unsafe in src/, and no allow(unsafe_code)"
 
 echo "==> licence"
 # A dual-licensed crate must ship both texts, and the placeholders in them must be filled: a

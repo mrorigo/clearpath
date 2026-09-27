@@ -98,7 +98,6 @@ containment — and a route that fails is refused rather than emitted.
   funnel is optimal *within* it.
 * No self-intersecting obstacle polygons, and no polygons with holes. A hole is expressible as a
   reversed-wound simple polygon.
-* No `simd` kernels yet. The feature exists and is the only place `unsafe` is permitted.
 
 `docs/SPEC.md` is the normative specification, and it is kept honest: it records every ambiguity
 that was resolved, including the several where the original design turned out to be unimplementable
@@ -153,8 +152,8 @@ rather than more plumbing inside the stages.
 ./scripts/ci.sh
 ```
 
-builds, checks `no_std`, runs clippy with `-D warnings`, enforces that `unsafe` appears only in
-`src/spline/simd.rs`, and runs the test suite **six times** — the property tests reseed every run,
+builds, checks `no_std`, runs clippy with `-D warnings`, asserts `src/` contains no `unsafe` and no
+`#[allow(unsafe_code)]`, and runs the test suite **six times** — the property tests reseed every run,
 and two of the bugs found during development reproduced on only some seeds, so one green run is
 not evidence. `cargo bench --bench route` produces the tables above.
 
