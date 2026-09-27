@@ -105,9 +105,13 @@ answer that exactly where a lookup would answer it approximately. A grid remains
 for a query that genuinely spans the workspace, and is the next step if the obstacle count grows
 enough for the linear scan to dominate again.
 
-A warm query still makes 124 allocations at 10 boxes (272 at 50), down from 292 and 657, but **the
-zero-allocation goal of `docs/SPEC.md` §8.1 is not met**: roughly one `Vec` per stage remains,
-plus the decomposition is rebuilt per query.
+A warm query makes 89 allocations at 10 boxes (232 at 50), down from 292 and 657 at the start of the
+optimisation work. The decomposition — the only stage that *scaled* with the input — now allocates
+nothing when warm, because it is refilled in place and owns its transient sweep state. **The
+zero-allocation goal of `docs/SPEC.md` §8.1 is still not met**: about 30 small `Vec`s remain across
+the other five stages, worth under a microsecond, and removing them is only worth doing for a caller
+who needs a genuinely allocation-free query — which argues for exposing a caller-owned scratch
+rather than more plumbing inside the stages.
 
 ## Development
 

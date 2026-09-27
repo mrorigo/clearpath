@@ -871,15 +871,21 @@ A warm query, measured with a counting global allocator (`tests/allocations.rs`)
 
 | Obstacles | Warm | Cold |
 | --- | --- | --- |
-| 10 | 124 allocations, 10.9 kB | 130 allocations, 11.4 kB |
-| 50 | 272 allocations, 29.5 kB | 279 allocations, 30.8 kB |
+| 10 | **89 allocations, 7.4 kB** | 142 allocations, 12.3 kB |
+| 50 | **232 allocations, 19.1 kB** | 296 allocations, 33.1 kB |
 
-**Still not zero, and the zero-allocation goal is not met.** What remains is roughly one `Vec` per
-stage — the funnel's portal and sign lists, the corridor, the knots, the tangents, the admissible
-sets — plus the decomposition being rebuilt per query. Reaching zero means threading the scratch
-through every stage and rebuilding the decomposition in place, which is the next step rather than
-this one. The `Vec`-of-`Vec` structures that dominated the earlier count are gone (that pass took
-10 boxes from 284 to 160 and halved the bytes).
+**Still not zero, and the goal stays unmet.** What remains is roughly one small `Vec` per stage —
+the funnel's portal and sign lists, the corridor, the knots, the tangents, the admissible sets —
+which together are about 30 allocations and under a microsecond. The part that *scaled* with the
+input is gone: the decomposition is refilled in place, and its transient sweep state is owned by it,
+so a warm query allocates nothing for it at all. That was worth doing on its own terms even where
+the latency gain was small, because a `no_std` caller on a pool cannot make 124 allocations per
+query disappear by wishing.
+
+Reaching zero would mean threading the scratch through the remaining five stages. On the measured
+numbers that is about 3% of a query, so it is not recommended for latency; it is only worth doing if
+a caller needs a genuinely allocation-free query, and the natural way to offer that is a
+caller-owned `Scratch` rather than more plumbing inside the stages.
 
 ### 8.2 Latency
 
@@ -887,9 +893,9 @@ this one. The `Vec`-of-`Vec` structures that dominated the earlier count are gon
 
 | Obstacles | margin 0 | margin 1 |
 | --- | --- | --- |
-| 10 | **26 us** | 16 us |
-| 50 | **118 us** | 90 us |
-| 200 | **713 us** | 649 us |
+| 10 | **27 us** | 16 us |
+| 50 | **120 us** | 90 us |
+| 200 | **721 us** | 655 us |
 
 `route_orthogonal`: 10 boxes 7.1 us, 50 boxes 92 us.
 
@@ -1156,3 +1162,30 @@ product question, one undecided algorithm) and closed them.
 | 42 | `is_free` used `distance >= 0` | True for every point, including points inside an obstacle | `Clearance::is_free` distinguishes *strictly* inside (`contains` and a positive distance) from *on* the boundary, because at `margin == 0` a taut path's knots lie exactly on boundaries and the guarantee is `>= margin` |
 | 38 | The M4 gate asserted the taut path is in the free space | Wrong assertion: a taut path hugs the obstacles it wraps around, so with `margin == 0` its knots lie exactly on obstacle boundaries. A containment test rejects every useful route | §9.0: a distance-based clearance test (`>= margin`), which is the actual guarantee. L2, the corridor-membership test, stays a containment test because a cell boundary is not an obstacle |
 
+
+---
+
+## 11. Version 1
+
+`v1` is the state at this commit: the smooth and rectilinear routers, the exact margin model, the
+analytic containment proofs, and the optimisation pass. What is in it:
+
+* `route_smooth` returning `$C^1$ cubic Bezier segments, collision free by construction at the ends
+  and by an exact hull test in the middle (§4.1, §6.4).
+* `route_orthogonal` returning a rectilinear polyline, with the Hanan grid's centre test exact
+  (§7.2).
+* A `margin` model that is exact for rectilinear geometry, conservative in the corner directions,
+  and *reported* rather than approximated for anything else (§3.3).
+* Determinism to the bit on a fixed target, and a stated semantic determinism across targets
+  (§4.4), with the fast-filter predicates in `geom::predicates` and the total-order `f64` sort that
+  the specification calls for.
+* `no_std` + `alloc`, with `unsafe` confined to a module that does not exist yet (§4.5).
+
+What is deliberately not in it, and why: incremental decomposition, global optimality across
+homotopy classes, `simd` kernels, and allocation-free queries. Each is a scope decision recorded
+above rather than an omission.
+
+The measurement that shaped this version is in §8: the pipeline is roughly 4x faster than its first
+working form, and at 10 obstacles it is comfortably inside the latency target the specification
+started with. At 50 and 200 it is 2.4x and 14x over it, and the remaining cost is the sweep and the
+obstacle-relative verification, in that proportion.

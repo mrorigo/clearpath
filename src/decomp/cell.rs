@@ -150,8 +150,37 @@ fn interpolate(a: Point2D, b: Point2D, x: f64) -> f64 {
     a.y + (b.y - a.y) * ((x - a.x) / dx)
 }
 
-/// A one-off working set for the sweep, so a `Decomposition` is built without reallocating per
-/// slab.
+/// The sweep's transient state, retained inside the `Decomposition` it is building.
+///
+/// Without this the sweep allocates for its active-edge lists, its probe lists, its portal
+/// remapping and its adjacency cursor on every query — which is where about half of a warm
+/// query's allocations came from, and all of the part that scaled with the number of event
+/// abscissae.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct Working {
+    pub active_flat: Vec<super::sweep::Edge>,
+    pub active_offsets: Vec<u32>,
+    pub probes: Vec<(usize, Point2D)>,
+    pub probe_offsets: Vec<u32>,
+    pub edges: Vec<super::sweep::Edge>,
+    pub cursor: Vec<u32>,
+    pub remap: Vec<u32>,
+}
+
+impl Working {
+    /// Drops the contents but keeps every allocation.
+    pub(crate) fn reset(&mut self) {
+        self.active_flat.clear();
+        self.active_offsets.clear();
+        self.probes.clear();
+        self.probe_offsets.clear();
+        self.edges.clear();
+        self.cursor.clear();
+        self.remap.clear();
+    }
+}
+
+/// A one-off working set for the sweep's cells and portals.
 #[derive(Debug, Default)]
 pub(crate) struct CellBuilder {
     pub cells: Vec<Cell>,
@@ -190,23 +219,47 @@ impl SideIndex {
     /// than a per-cell list of them is what keeps this allocation-free: a `Vec<Vec<_>>` indexed by
     /// cell was one allocation per cell, and a cell's side can overlap several cells, so the
     /// "per-cell list" is not a single value anyway.
+    /// Builds a fresh index. `refill_from_portals` is the one the sweep uses; this exists for
+    /// tests that want an index without a decomposition.
+    #[cfg_attr(not(test), expect(dead_code))]
     pub(crate) fn from_portals(cell_count: usize, portals: &[Portal], right: bool) -> Self {
-        let mut offsets = alloc::vec![0u32; cell_count + 1];
+        let mut target = Self::default();
+        target.refill_from_portals(cell_count, portals, right, &mut Vec::new());
+        target
+    }
+
+    /// Drops the index but keeps its allocations.
+    pub(crate) fn clear(&mut self) {
+        self.offsets.clear();
+        self.ids.clear();
+    }
+
+    /// Rebuilds this index in place, keeping its allocations.
+    pub(crate) fn refill_from_portals(
+        &mut self,
+        cell_count: usize,
+        portals: &[Portal],
+        right: bool,
+        cursor: &mut Vec<u32>,
+    ) {
+        self.offsets.clear();
+        self.offsets.resize(cell_count + 1, 0u32);
         for p in portals {
             let owner = if right { p.left as usize } else { p.right as usize };
-            offsets[owner + 1] += 1;
+            self.offsets[owner + 1] += 1;
         }
-        for i in 1..offsets.len() {
-            offsets[i] += offsets[i - 1];
+        for i in 1..self.offsets.len() {
+            self.offsets[i] += self.offsets[i - 1];
         }
-        let mut ids = alloc::vec![0 as PortalId; portals.len()];
-        let mut cursor: Vec<u32> = offsets[..cell_count].to_vec();
+        self.ids.clear();
+        self.ids.resize(portals.len(), 0);
+        cursor.clear();
+        cursor.extend_from_slice(&self.offsets[..cell_count]);
         for (new_id, p) in portals.iter().enumerate() {
             let owner = if right { p.left as usize } else { p.right as usize };
-            ids[cursor[owner] as usize] = new_id as PortalId;
+            self.ids[cursor[owner] as usize] = new_id as PortalId;
             cursor[owner] += 1;
         }
-        Self { offsets, ids }
     }
 
     #[inline]

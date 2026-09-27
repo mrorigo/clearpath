@@ -169,13 +169,54 @@ fn through_a_narrow_passage_with_a_margin() {
         box_poly([80.0, 0.0, 84.0, 60.0]),
     ];
     check_route(&obstacles, 2.0, p(5.0, 20.0), p(95.0, 20.0));
-    // A margin of 5 closes the 8-wide gap, so no corridor exists.
+
+    // A margin of 5 seals the 8-wide gap, so nothing can thread *it*. It does not seal the
+    // workspace: the stack tops out well below the top, so a route still exists by going over, and
+    // asserting otherwise would be asserting that the obstacle stack is infinite.
     let space = FreeSpace::new(WORKSPACE, obstacles.clone()).unwrap();
-    let decomp = decompose_with_guides(&space, 5.0, &[5.0, 95.0]).unwrap();
+    let decomp = decompose_with_guides(&space, 5.0, &[]).unwrap();
+    let clearance = pathplan::Clearance::new(&obstacles, WORKSPACE, 5.0);
+    assert!(
+        !clearance.is_free(p(65.0, 50.0)),
+        "a margin of 5 must seal the 8-wide gap"
+    );
+    // And any route that exists goes over the top rather than through the seal.
+    let mut scratch = SearchScratch::default();
+    if let Ok(corridor) = search(&decomp, p(5.0, 20.0), p(95.0, 20.0), &mut scratch) {
+        let path = string_pull(&decomp, &corridor, p(5.0, 20.0), p(95.0, 20.0)).unwrap();
+        for w in path.knots.windows(2) {
+            for k in 0..=32 {
+                let q = w[0].lerp(w[1], k as f64 / 32.0);
+                assert!(clearance.is_free(q), "the route threads the sealed gap at {q:?}");
+            }
+        }
+    }
+}
+
+/// A regression: an endpoint lying exactly on the *eroded* workspace boundary must be locatable.
+///
+/// The sweep used to emit event lines for the un-eroded workspace sides, which left an empty slab
+/// beyond each end of the free space. An endpoint sitting exactly on the eroded boundary therefore
+/// fell into that empty slab, was unlocatable, and reported `NoPathFound` — whatever the geometry.
+/// A query ending on the boundary is an ordinary thing for a caller to write, and it silently
+/// reported "no route" for routable inputs. This was found by the in-place refill refactor, which
+/// incidentally aligned the event lines with the eroded workspace; a test that had been asserting
+/// the artefact is the test that caught it.
+#[test]
+fn an_endpoint_on_the_eroded_workspace_boundary_is_locatable() {
+    let space = FreeSpace::new(WORKSPACE, Vec::new()).unwrap();
+    // A margin of 5 puts the eroded boundary at 5 and 95.
+    let decomp = decompose_with_guides(&space, 5.0, &[]).unwrap();
+    for corner in [p(5.0, 5.0), p(95.0, 95.0), p(5.0, 95.0), p(95.0, 5.0)] {
+        assert!(
+            decomp.locate(corner).is_some(),
+            "{corner:?} is on the eroded boundary and should be in a cell"
+        );
+    }
     let mut scratch = SearchScratch::default();
     assert!(
-        search(&decomp, p(5.0, 20.0), p(95.0, 20.0), &mut scratch).is_err(),
-        "a 8-unit gap cannot pass a margin of 5"
+        search(&decomp, p(5.0, 50.0), p(95.0, 50.0), &mut scratch).is_ok(),
+        "open space must route between points on the eroded boundary"
     );
 }
 

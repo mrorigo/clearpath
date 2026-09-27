@@ -3,7 +3,7 @@
 use alloc::vec::Vec;
 
 use crate::corridor::AdmissibleTangents;
-use crate::decomp::sweep::decompose_with_guides;
+use crate::decomp::sweep::decompose_into;
 use crate::error::PathPlanError;
 use crate::funnel::cell_search::search;
 use crate::funnel::string_pull::string_pull;
@@ -28,19 +28,22 @@ pub fn route_smooth(
     let clearance = req.clearance();
 
     // Stage 1: the inflated domain, with the endpoints' abscissae forced onto event lines so the
-    // corridor can be monotone in x (section 6.3a).
-    let decomp = decompose_with_guides(
+    // corridor can be monotone in x (section 6.3a). Refilled in place, so a warm query allocates
+    // nothing here.
+    let Scratch { decomp, search: search_scratch, .. } = scratch;
+    decompose_into(
+        decomp,
         &free_space,
         req.config.margin,
         &[req.start.point.x, req.goal.point.x],
     )?;
 
     // Stage 2: a corridor, then the taut string through it.
-    let corridor = search(&decomp, req.start.point, req.goal.point, &mut scratch.search)?;
-    let path = string_pull(&decomp, &corridor, req.start.point, req.goal.point)?;
+    let corridor = search(decomp, req.start.point, req.goal.point, search_scratch)?;
+    let path = string_pull(decomp, &corridor, req.start.point, req.goal.point)?;
 
     // Stage 3: what each knot's tangent is allowed to be.
-    let admissible = AdmissibleTangents::build(&decomp, &corridor.cells, &path.knots)?;
+    let admissible = AdmissibleTangents::build(decomp, &corridor.cells, &path.knots)?;
 
     // Stage 4: the tangents, then the repair.
     let seeds = seed_tangents(&path.knots, &req.start, &req.goal);

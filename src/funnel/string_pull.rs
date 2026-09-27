@@ -337,15 +337,10 @@ mod tests {
             Portal { x: 17.0, lo: 39.0, hi: 41.0, left: 3, right: 2 },
             Portal { x: 15.0, lo: 47.0, hi: 99.0, left: 4, right: 3 },
         ];
-        let d = Decomposition {
-            xs: vec![9.0, 15.0, 17.0, 23.0, 25.0, 31.0],
-            slab_cells: Vec::new(),
-            slab_cell_offsets: Vec::new(),
-            cells,
-            portals,
-            right_index: crate::decomp::cell::SideIndex::from_portals(5, &[], true),
-            left_index: crate::decomp::cell::SideIndex::from_portals(5, &[], false),
-        };
+        // Built by hand rather than through the sweep: this fixture is about the funnel's portal
+        // handling, and driving it through a real decomposition would test the sweep instead.
+        let mut d = Decomposition::empty();
+        d.build_from_parts(vec![9.0, 15.0, 17.0, 23.0, 25.0, 31.0], cells, portals);
         let corridor = Corridor {
             cells: vec![0, 1, 2, 3, 4],
             portals: vec![0 as PortalId, 1, 2, 3],

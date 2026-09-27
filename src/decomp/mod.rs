@@ -21,6 +21,12 @@ pub use cell::{Cell, CellId, Portal, PortalId};
 /// inputs against a direct free-space predicate.
 #[derive(Clone, Debug, Default)]
 pub struct Decomposition {
+    /// Transient sweep state, retained so a warm query does not re-allocate it.
+    ///
+    /// Private, and owned by the decomposition rather than by a separate scratch type, so that
+    /// refilling a decomposition in place is one argument rather than two. It is not part of the
+    /// partition and nothing may read it.
+    working: cell::Working,
     /// Sorted, distinct event x coordinates. There are `xs.len() - 1` slabs.
     pub(crate) xs: Vec<f64>,
     /// Cells grouped by slab in one flat buffer, ordered bottom to top within a slab.
@@ -37,6 +43,39 @@ pub struct Decomposition {
 }
 
 impl Decomposition {
+    /// An empty partition, for building one by hand in tests.
+    pub fn empty() -> Self {
+        Self::default()
+    }
+
+    /// Builds a partition by hand from its parts, for tests that exercise a consumer without
+    /// going through the sweep.
+    pub fn build_from_parts(&mut self, xs: Vec<f64>, cells: Vec<Cell>, portals: Vec<Portal>) {
+        self.clear();
+        self.xs = xs;
+        self.slab_cells.clear();
+        self.slab_cell_offsets.clear();
+        self.cells = cells;
+        self.portals = portals;
+        self.right_index.refill_from_portals(self.cells.len(), &self.portals, true, &mut self.working.cursor);
+        self.left_index.refill_from_portals(self.cells.len(), &self.portals, false, &mut self.working.cursor);
+    }
+
+    /// Drops the partition but keeps every allocation, so a refill is allocation-free.
+    ///
+    /// The working state is *not* cleared here: [`decompose_into`](super::sweep::decompose_into)
+    /// resets it as its first act, and doing it twice would be redundant. Keeping it is what makes
+    /// "cleared but ready" true of the whole object.
+    pub(crate) fn clear(&mut self) {
+        self.xs.clear();
+        self.slab_cells.clear();
+        self.slab_cell_offsets.clear();
+        self.cells.clear();
+        self.portals.clear();
+        self.right_index.clear();
+        self.left_index.clear();
+    }
+
     /// The cells.
     #[inline]
     pub fn cells(&self) -> &[Cell] {

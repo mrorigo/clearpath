@@ -8,13 +8,19 @@
 use alloc::vec::Vec;
 
 use crate::corridor::AdmissibleSet;
-use crate::decomp::PortalId;
+use crate::decomp::{Decomposition, PortalId};
 use crate::funnel::cell_search::SearchScratch;
 use crate::geom::Point2D;
 
 /// Everything a query allocates after the decomposition, kept alive between queries.
 #[derive(Clone, Debug, Default)]
 pub struct Scratch {
+    /// The decomposition, refilled in place on every query.
+    ///
+    /// This is the one part of a query that scales with the number of event abscissae, and it was
+    /// about half of a warm query's allocations. Retaining it is what makes section 8.1's goal
+    /// reachable; every buffer in it keeps its capacity across queries.
+    pub decomp: Decomposition,
     /// The cell search's arrays: `g_score`, `came_from`, `closed` and the open list.
     pub search: SearchScratch,
     /// The rectilinear grid search's arrays.

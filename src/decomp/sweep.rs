@@ -2,7 +2,7 @@
 
 use alloc::vec::Vec;
 
-use super::cell::{Cell, CellBuilder, CellId, Portal, SideIndex};
+use super::cell::{Cell, CellBuilder, CellId, Portal, Working};
 use super::Decomposition;
 use crate::error::PathPlanError;
 use crate::geom::point::Point2D;
@@ -12,7 +12,7 @@ use crate::geom::FreeSpace;
 
 /// A boundary edge: one edge of an offset obstacle, or one of the workspace walls.
 #[derive(Clone, Copy, Debug)]
-struct Edge {
+pub(crate) struct Edge {
     a: Point2D,
     b: Point2D,
     /// Which obstacle this edge belongs to, or `None` for a workspace wall.
@@ -63,7 +63,9 @@ impl Edge {
 /// A `margin` against a non-rectilinear obstacle is therefore rejected rather than approximated;
 /// see [`PathPlanError::MarginUnsupportedGeometry`].
 pub fn decompose(space: &FreeSpace, margin: f64) -> Result<Decomposition, PathPlanError> {
-    build(space, margin, &[])
+    let mut out = Decomposition::empty();
+    decompose_into(&mut out, space, margin, &[])?;
+    Ok(out)
 }
 
 /// [`decompose`], with extra abscissae forced into the event set.
@@ -78,65 +80,80 @@ pub fn decompose_with_guides(
     margin: f64,
     guides: &[f64],
 ) -> Result<Decomposition, PathPlanError> {
-    build(space, margin, guides)
+    let mut out = Decomposition::empty();
+    decompose_into(&mut out, space, margin, guides)?;
+    Ok(out)
 }
 
-fn build(
+/// Refills `out` with the vertical decomposition of the inflated free space.
+///
+/// Every buffer in `out` — and the transient sweep state it owns — keeps its capacity, so a warm
+/// query allocates nothing here. That is the point of taking the decomposition by mutable
+/// reference: it is the only part of a query that scales with the number of event abscissae, and
+/// it was about half of a warm query's allocations.
+///
+/// On any error `out` is left cleared rather than half-built, so a caller that ignores the result
+/// cannot read a stale partition.
+pub fn decompose_into(
+    out: &mut Decomposition,
     space: &FreeSpace,
     margin: f64,
     guides: &[f64],
-) -> Result<Decomposition, PathPlanError> {
+) -> Result<(), PathPlanError> {
+    out.clear();
     if !margin.is_finite() || margin < 0.0 {
         return Err(PathPlanError::InvalidConfig("margin must be finite and >= 0"));
     }
-    let ws = space.workspace;
-    if ws.is_degenerate() {
+    if space.workspace.is_degenerate() {
         return Err(PathPlanError::DegenerateWorkspace);
     }
     let (workspace, forbidden) = apply_margin(space, margin)?;
     if workspace.is_degenerate() {
         // The margin is larger than the workspace on at least one axis, so there is no free space
         // left. An empty decomposition routes as `NoPathFound`, which is the honest answer.
-        return Ok(Decomposition::default());
+        return Ok(());
     }
-    let edges = collect_edges(&workspace, &forbidden);
-    let mut xs = event_coordinates(&edges, ws);
-    // Guides are only honoured strictly inside the eroded workspace: an event line on or outside
-    // the boundary would create a slab that lies entirely outside the free space.
+
+    out.working.reset();
+    collect_edges(&mut out.working, &workspace, &forbidden);
+
+    // The event abscissae: every boundary vertex, the workspace's own sides, and any guides.
+    out.xs.reserve(out.working.edges.len() * 2 + guides.len() + 2);
+    for e in &out.working.edges {
+        out.xs.push(e.a.x);
+        out.xs.push(e.b.x);
+    }
+    out.xs.push(workspace.min.x);
+    out.xs.push(workspace.max.x);
     for g in guides {
+        // Only strictly inside the eroded workspace: an event line on or outside the boundary would
+        // create a slab lying entirely outside the free space.
         if g.is_finite() && *g > workspace.min.x && *g < workspace.max.x {
-            xs.push(*g);
+            out.xs.push(*g);
         }
     }
-    sort_f64_ascending(&mut xs);
-    xs.dedup();
-
-    // Degenerate free space: no cells at all.
-    if xs.len() < 2 {
-        return Ok(Decomposition::default());
+    sort_f64_ascending(&mut out.xs);
+    out.xs.dedup();
+    if out.xs.len() < 2 {
+        return Ok(());
     }
-
 
     // The active edge list and the probe points for each slab, as flat runs in one buffer each
     // rather than a `Vec` per slab. A `Vec` of `Vec`s is one allocation per slab per list, and a
-    // decomposition has one slab per distinct event abscissa — on a two-hundred-box route that was
-    // several hundred allocations before anything else happened.
-    let mut active_flat: Vec<Edge> = Vec::new();
-    let mut active_offsets: Vec<u32> = Vec::with_capacity(xs.len());
-    let mut probes: Vec<(usize, Point2D)> = Vec::new();
-    let mut probe_offsets: Vec<u32> = Vec::with_capacity(xs.len());
-    for k in 0..xs.len() - 1 {
-        let (lo, hi) = (xs[k], xs[k + 1]);
+    // decomposition has one slab per distinct event abscissa.
+    for k in 0..out.xs.len() - 1 {
+        let (lo, hi) = (out.xs[k], out.xs[k + 1]);
         let mid = 0.5 * (lo + hi);
-        let start = active_flat.len();
-        active_flat.extend(edges.iter().copied().filter(|e| e.covers(lo, hi)));
-        sort_by_y_at(&mut active_flat[start..], mid);
-        active_offsets.push(active_flat.len() as u32);
-        let pstart = probes.len();
-        gap_probes_into(&active_flat[start..], mid, &mut probes);
-        probe_offsets.push(probes.len() as u32);
-        debug_assert!(pstart <= probes.len());
+        let start = out.working.active_flat.len();
+        out.working
+            .active_flat
+            .extend(out.working.edges.iter().copied().filter(|e| e.covers(lo, hi)));
+        sort_by_y_at(&mut out.working.active_flat[start..], mid);
+        out.working.active_offsets.push(out.working.active_flat.len() as u32);
+        gap_probes_into(&out.working.active_flat[start..], mid, &mut out.working.probes);
+        out.working.probe_offsets.push(out.working.probes.len() as u32);
     }
+
     // Run `k` of a flat buffer, where `offsets` holds one end offset per run and run 0 starts at 0.
     let run_of = |offsets: &[u32], k: usize| {
         let a = if k == 0 { 0 } else { offsets[k - 1] as usize };
@@ -147,92 +164,77 @@ fn build(
     // Cells, grouped by slab in one flat buffer with an index of where each slab's run starts.
     // Same reason as the working lists: a `Vec` per slab was one allocation per slab.
     let mut builder = CellBuilder::default();
-    let mut slab_cells: Vec<CellId> = Vec::new();
-    let mut slab_cell_offsets: Vec<u32> = Vec::with_capacity(xs.len());
-    for k in 0..xs.len() - 1 {
-        let (pa, pb) = run_of(&probe_offsets, k);
-        let (aa, ab) = run_of(&active_offsets, k);
-        let slab_probes = &probes[pa..pb];
-        let slab_edges = &active_flat[aa..ab];
+    for k in 0..out.xs.len() - 1 {
+        let (pa, pb) = run_of(&out.working.probe_offsets, k);
+        let (aa, ab) = run_of(&out.working.active_offsets, k);
+        let slab_probes = &out.working.probes[pa..pb];
+        let slab_edges = &out.working.active_flat[aa..ab];
         for (gap, probe) in slab_probes {
             if is_free(&forbidden, *probe) && workspace.contains(*probe) {
-                let cell = cell_from_gap(slab_edges, *gap, xs[k], xs[k + 1]);
-                slab_cells.push(builder.push_cell(cell));
+                let cell = cell_from_gap(slab_edges, *gap, out.xs[k], out.xs[k + 1]);
+                out.slab_cells.push(builder.push_cell(cell));
             }
         }
-        slab_cell_offsets.push(slab_cells.len() as u32);
+        out.slab_cell_offsets.push(out.slab_cells.len() as u32);
     }
 
     // Portals: at every event line, join the cells of the two adjacent slabs over their vertical
     // overlap. Both lists are sorted and disjoint in y, so this is a linear merge.
-    for (k, x) in xs.iter().enumerate().take(xs.len() - 1).skip(1) {
-        let (la, lb) = run_of(&slab_cell_offsets, k - 1);
-        let (ra, rb) = run_of(&slab_cell_offsets, k);
-        connect_slabs(&mut builder, &slab_cells[la..lb], &slab_cells[ra..rb], *x);
+    for (k, x) in out.xs.iter().enumerate().take(out.xs.len() - 1).skip(1) {
+        let (la, lb) = run_of(&out.slab_cell_offsets, k - 1);
+        let (ra, rb) = run_of(&out.slab_cell_offsets, k);
+        connect_slabs(&mut builder, &out.slab_cells[la..lb], &out.slab_cells[ra..rb], *x);
     }
 
-    let cells = builder.cells;
     // A portal whose overlap collapsed to zero length carries no information and would make the
     // funnel see a zero-width gate. Dropping it also drops the adjacency, which is what we want:
     // two cells that touch only at a point are not connected.
-    let mut remap: Vec<u32> = alloc::vec![u32::MAX; builder.portals.len()];
-    let mut portals: Vec<Portal> = Vec::with_capacity(builder.portals.len());
+    out.working.remap.clear();
+    out.working.remap.resize(builder.portals.len(), u32::MAX);
+    out.portals.clear();
     for (old, portal) in builder.portals.iter().enumerate() {
         if portal.hi > portal.lo {
-            remap[old] = portals.len() as u32;
-            portals.push(*portal);
+            out.working.remap[old] = out.portals.len() as u32;
+            out.portals.push(*portal);
         }
     }
 
     // Compressed adjacency, built by two counting passes. A cell's side can overlap several cells on
     // the other side, so both sides are lists rather than single portals; and a `Vec<Vec<_>>` here
     // was one allocation per cell.
-    let n = cells.len();
-    let right_index = SideIndex::from_portals(n, &portals, true);
-    let left_index = SideIndex::from_portals(n, &portals, false);
-
-    Ok(Decomposition { xs, slab_cells, slab_cell_offsets, cells, portals, right_index, left_index })
+    let n = out.slab_cells.len();
+    out.right_index.refill_from_portals(n, &out.portals, true, &mut out.working.cursor);
+    out.left_index.refill_from_portals(n, &out.portals, false, &mut out.working.cursor);
+    out.cells.append(&mut builder.cells);
+    Ok(())
 }
 
 /// Every edge of every offset obstacle, plus the four workspace walls.
 ///
 /// The walls are what keep the sweep inside the workspace: the bottom and top walls are always
 /// active, so the gaps beyond them are never free, and the side walls close the x range.
-fn collect_edges(ws: &BoundingBox, obstacles: &[Polygon]) -> Vec<Edge> {
-    let mut edges: Vec<Edge> = Vec::new();
+fn collect_edges(working: &mut Working, ws: &BoundingBox, obstacles: &[Polygon]) {
+    working.edges.clear();
     for (i, p) in obstacles.iter().enumerate() {
         let v = p.vertices();
         for k in 0..v.len() {
-            edges.push(Edge { a: v[k], b: v[(k + 1) % v.len()], obstacle: Some(i as u32), index: k as u32 });
+            working.edges.push(Edge {
+                a: v[k],
+                b: v[(k + 1) % v.len()],
+                obstacle: Some(i as u32),
+                index: k as u32,
+            });
         }
     }
     let corners = ws.corners();
     for k in 0..4 {
-        edges.push(Edge {
+        working.edges.push(Edge {
             a: corners[k],
             b: corners[(k + 1) % 4],
             obstacle: None,
             index: 4 + k as u32,
         });
     }
-    edges
-}
-
-/// The sorted, distinct event x coordinates: every vertex abscissa, plus the workspace's.
-fn event_coordinates(edges: &[Edge], ws: BoundingBox) -> Vec<f64> {
-    let mut xs: Vec<f64> = Vec::with_capacity(edges.len() + 2);
-    for e in edges {
-        xs.push(e.a.x);
-        xs.push(e.b.x);
-    }
-    xs.push(ws.min.x);
-    xs.push(ws.max.x);
-    sort_f64_ascending(&mut xs);
-    xs.dedup();
-    // Drop event lines that the workspace walls make unreachable; a zero-width remainder would
-    // produce a degenerate slab.
-    xs.retain(|x| x.is_finite());
-    xs
 }
 
 /// Ascending sort of `f64` as a total order on the bit patterns.
