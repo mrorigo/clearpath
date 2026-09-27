@@ -10,6 +10,8 @@ use alloc::vec::Vec;
 
 use crate::geom::Point2D;
 
+use cell::SideIndex;
+
 pub use cell::{Cell, CellId, Portal, PortalId};
 
 /// A partition of the free space into convex cells.
@@ -26,6 +28,10 @@ pub struct Decomposition {
     pub(crate) slab_cells: Vec<Vec<CellId>>,
     pub(crate) cells: Vec<Cell>,
     pub(crate) portals: Vec<Portal>,
+    /// Portals to the right of each cell, as a compressed list.
+    pub(crate) right_index: SideIndex,
+    /// Portals to the left of each cell, as a compressed list.
+    pub(crate) left_index: SideIndex,
 }
 
 impl Decomposition {
@@ -53,18 +59,36 @@ impl Decomposition {
         self.portals.len()
     }
 
-    /// The cell to the right of `cell` across its right portal, if it has one.
+    /// The portals on the right side of `cell`.
+    ///
+    /// Usually zero or one, but can be several: a wide cell's right side can overlap several
+    /// narrower cells in the next slab.
     #[inline]
-    pub fn right_neighbour(&self, cell: CellId) -> Option<(PortalId, CellId)> {
-        let p = self.cells[cell as usize].right?;
-        Some((p, self.portals[p as usize].right))
+    pub fn right_portals(&self, cell: CellId) -> &[PortalId] {
+        self.right_index.get(cell)
     }
 
-    /// The cell to the left of `cell` across its left portal, if it has one.
+    /// The portals on the left side of `cell`.
     #[inline]
-    pub fn left_neighbour(&self, cell: CellId) -> Option<(PortalId, CellId)> {
-        let p = self.cells[cell as usize].left?;
-        Some((p, self.portals[p as usize].left))
+    pub fn left_portals(&self, cell: CellId) -> &[PortalId] {
+        self.left_index.get(cell)
+    }
+
+    /// The portals joining `cell` to the cell on the other side of each.
+    ///
+    /// A convenience for the common case; a caller that needs to walk the whole fan uses
+    /// [`Decomposition::right_portals`].
+    pub fn right_neighbours(&self, cell: CellId) -> impl Iterator<Item = (PortalId, CellId)> + '_ {
+        self.right_portals(cell)
+            .iter()
+            .map(move |p| (*p, self.portals[*p as usize].right))
+    }
+
+    /// The cells on the other side of each of `cell`'s left portals.
+    pub fn left_neighbours(&self, cell: CellId) -> impl Iterator<Item = (PortalId, CellId)> + '_ {
+        self.left_portals(cell)
+            .iter()
+            .map(move |p| (*p, self.portals[*p as usize].left))
     }
 
     /// The cell containing `p`, or `None` if `p` is outside the free space.

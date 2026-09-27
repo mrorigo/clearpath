@@ -501,6 +501,25 @@ that corridor.
 * The first and last portals are replaced by the degenerate portals `{start}` and `{goal}`
   respectively, per Lee & Preparata; this is why the funnel cannot be handed a corridor whose
   ends are not the query points, and why the goal's own cell must terminate the corridor.
+* **The orientation sign depends on the direction of travel.** Mirroring `x` flips the orientation
+  of every triangle the wedge inequalities are written against, so a right-to-left corridor needs
+  the opposite sign. The sign is carried as an explicit per-portal `s` rather than by swapping which
+  endpoint is called `left`, because splitting the meaning across two conventions is how they drift
+  apart; they were wrong together here, and the result was a path that looked plausible and left
+  the corridor.
+* **The scan restarts at the portal that produced the committed knot, plus one** — not at the length
+  of the chain. The two differ by however many times each side has been retightened, and using the
+  length restarts one portal too far: a knot at a slot's end is silently dropped and the next
+  segment cuts through the obstacle it was meant to go around. `tests/funnel.rs` and the
+  `the_funnel_touches_both_ends_of_a_slot` unit test both pin this.
+* The committed corners are the *interior* knots; `start` and `goal` are prepended and appended
+  here. Omitting the start is a silent bug that looks like a path beginning at a corner.
+* The result is **verified against the corridor before it is returned**, and a path that leaves it
+  is refused with `NoPathFound`. This is a safety net, not the mechanism: the funnel is proven for a
+  monotone sleeve and the search is arranged to produce one, but the equal-abscissa fallback can
+  still hand it a sleeve the algorithm was not written for. Refusing is the only safe answer — the
+  alternative is a collision. The check is `O(segments x cells)` and is a candidate for removal
+  once the fallback is either fixed or removed.
 * Output is the taut polyline. Its interior knots lie on cell boundary edges (L2); knots that
   are redundant (collinear or duplicated within `geom::EPS`) are dropped before emission.
 * Scratch buffers for the funnel state are passed in by the caller; the inner loop performs no
@@ -997,4 +1016,8 @@ product question, one undecided algorithm) and closed them.
 | 32 | §3.3's original "offset each obstacle by `margin`, approximating convex corners with arcs" | **Unsound.** The offset boundary of a *reflex* corner is not the crossing of the two offset lines and not an arc about the vertex, and the failure is not a small inaccuracy: on a comb-shaped obstacle the construction put offset-boundary points at zero distance from the obstacle on 854 sampled positions, and whether it failed was non-monotone in `margin` (0.4, 0.5 and 0.6 failed while 0.8 and 1.0 succeeded). Silently violating the clearance is the worst failure mode in the whole crate | §3.3 rewritten: the growth is a **square inflation** applied to a rectilinear partition of each obstacle, which is exact. A nonzero `margin` against a non-rectilinear obstacle is now a reported error rather than a wrong answer. The alternatives (eroding cells; trimming offsets) are recorded in §3.3 with the reason each fails |
 | 33 | §7.1's `MarginTooLarge` and `WorkspaceEroded` variants | Both existed only to paper over the offsetting failures; with exact square inflation neither condition can arise | Removed, with the reason stated (§7.1) |
 | 34 | §8.2's "< 50 us" target | Not met, and the measurement is recorded rather than the target quietly dropped | §8.2 now carries the measured decomposition cost (74 us at 10 boxes, 227 us at 50) and names the optimisation the target depends on |
+| 35 | A cell has one left portal and one right portal | A cell's side can overlap *several* cells on the other side, so the portal is overwritten and the adjacency is lost | §6.3a: both sides are lists, held in two compressed lists so there is no per-cell allocation |
+| 36 | The funnel's portal `left`/`right` were assigned once, globally, from the corridor's overall direction | A corridor is not necessarily monotone in x — the cell graph fans out — so half the portals can be entered in the opposite direction to the other half, and the funnel then commits knots from the wrong chain. The result is a path that looks plausible and leaves the corridor | §6.3b: the orientation is carried per portal, and the corridor is made monotone by construction (§6.3a) so the case does not arise in the first place |
+| 37 | The funnel's scan restarted at the length of the tightened chain | Off by however many times the sides were retightened, i.e. one portal too far. A knot at a slot's end is dropped and the next segment crosses the obstacle | §6.3b: the sides record the portal that *produced* them, and the scan restarts at that portal plus one. Pinned by `the_funnel_touches_both_ends_of_a_slot` |
+| 38 | The M4 gate asserted the taut path is in the free space | Wrong assertion: a taut path hugs the obstacles it wraps around, so with `margin == 0` its knots lie exactly on obstacle boundaries. A containment test rejects every useful route | §9.0: a distance-based clearance test (`>= margin`), which is the actual guarantee. L2, the corridor-membership test, stays a containment test because a cell boundary is not an obstacle |
 

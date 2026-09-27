@@ -52,6 +52,10 @@ impl Portal {
 ///
 /// The four corners are counter-clockwise starting bottom-left. A cell may be a triangle, when the
 /// two boundary edges meet inside the slab.
+///
+/// A cell's neighbours are not stored here: a cell's right side can overlap *several* cells of the
+/// next slab, so there is no single right portal. The adjacency lives in
+/// [`Decomposition`](super::Decomposition) as two compressed lists.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Cell {
     /// Bottom-left corner.
@@ -62,10 +66,6 @@ pub struct Cell {
     pub tr: Point2D,
     /// Top-left corner.
     pub tl: Point2D,
-    /// The portal on the left edge, if any.
-    pub left: Option<PortalId>,
-    /// The portal on the right edge, if any.
-    pub right: Option<PortalId>,
 }
 
 impl Cell {
@@ -170,9 +170,49 @@ impl CellBuilder {
     }
 }
 
+/// Compressed adjacency: for each cell, the slice of `ids` covering `[offsets[i], offsets[i + 1])`
+/// is the list of portals on that side.
+///
+/// Two of these (left and right) replace a per-cell `Vec`, so the whole adjacency is six flat
+/// arrays and the decomposition has no per-cell allocation. The spec's zero-allocation target
+/// (section 8.1) depends on that, so it is built this way from the start.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct SideIndex {
+    offsets: Vec<u32>,
+    ids: Vec<PortalId>,
+}
+
+impl SideIndex {
+    /// Builds the index from, for each cell id, the portals on that side.
+    pub(crate) fn build<'a>(cell_count: usize, per_cell: impl Fn(CellId) -> &'a [PortalId]) -> Self {
+        let mut offsets = Vec::with_capacity(cell_count + 1);
+        let mut ids: Vec<PortalId> = Vec::new();
+        for cell in 0..cell_count {
+            offsets.push(ids.len() as u32);
+            ids.extend_from_slice(per_cell(cell as CellId));
+        }
+        offsets.push(ids.len() as u32);
+        Self { offsets, ids }
+    }
+
+    #[inline]
+    pub(crate) fn get(&self, cell: CellId) -> &[PortalId] {
+        let a = self.offsets[cell as usize] as usize;
+        let b = self.offsets[cell as usize + 1] as usize;
+        &self.ids[a..b]
+    }
+
+    #[inline]
+    #[cfg_attr(not(test), expect(dead_code))]
+    pub(crate) fn len(&self) -> usize {
+        self.offsets.len() - 1
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::vec;
 
     fn unit_trapezoid() -> Cell {
         Cell {
@@ -180,8 +220,6 @@ mod tests {
             br: Point2D::new(1.0, 0.0),
             tr: Point2D::new(1.0, 1.0),
             tl: Point2D::new(0.0, 1.0),
-            left: None,
-            right: None,
         }
     }
 
@@ -202,8 +240,6 @@ mod tests {
             br: Point2D::new(2.0, 0.0),
             tr: Point2D::new(2.0, 4.0),
             tl: Point2D::new(0.0, 2.0),
-            left: None,
-            right: None,
         };
         assert_eq!(c.bottom_at(1.0), 0.0);
         assert_eq!(c.top_at(0.0), 2.0);
@@ -232,8 +268,6 @@ mod tests {
             br: Point2D::new(1.0, 5.0),
             tr: Point2D::new(1.0, 7.0),
             tl: Point2D::new(1.0, 5.0),
-            left: None,
-            right: None,
         };
         assert_eq!(c.bottom_at(1.0), 0.0);
         assert_eq!(c.top_at(1.0), 5.0);
@@ -245,6 +279,22 @@ mod tests {
         assert_eq!(p.length(), 3.0);
         assert_eq!(p.bottom(), Point2D::new(3.0, 1.0));
         assert_eq!(p.top(), Point2D::new(3.0, 4.0));
+    }
+
+    #[test]
+    fn side_index_slices_per_cell() {
+        let owned: Vec<Vec<PortalId>> = vec![vec![3, 1], vec![], vec![7], vec![0, 5, 9]];
+        let index = SideIndex::build(owned.len(), |c| &owned[c as usize]);
+        assert_eq!(index.len(), 4);
+        for (c, expected) in owned.iter().enumerate() {
+            assert_eq!(index.get(c as CellId), expected.as_slice(), "cell {c}");
+        }
+    }
+
+    #[test]
+    fn side_index_of_nothing_is_empty() {
+        let index = SideIndex::build(0, |_| &[]);
+        assert_eq!(index.len(), 0);
     }
 
     #[test]

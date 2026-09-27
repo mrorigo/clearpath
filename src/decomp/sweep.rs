@@ -2,7 +2,7 @@
 
 use alloc::vec::Vec;
 
-use super::cell::{Cell, CellBuilder, CellId, Portal};
+use super::cell::{Cell, CellBuilder, CellId, Portal, PortalId, SideIndex};
 use super::Decomposition;
 use crate::error::PathPlanError;
 use crate::geom::point::Point2D;
@@ -63,6 +63,29 @@ impl Edge {
 /// A `margin` against a non-rectilinear obstacle is therefore rejected rather than approximated;
 /// see [`PathPlanError::MarginUnsupportedGeometry`].
 pub fn decompose(space: &FreeSpace, margin: f64) -> Result<Decomposition, PathPlanError> {
+    build(space, margin, &[])
+}
+
+/// [`decompose`], with extra abscissae forced into the event set.
+///
+/// Giving the sweep the start and goal abscissae puts each of them on an event line, so the start
+/// and goal always land in *different* slabs. That matters downstream: the funnel is only proven for
+/// a corridor whose portals are ordered along the path, and a corridor can only be monotone in x if
+/// its two ends are not in the same slab. Without this, any query whose endpoints share a slab —
+/// which is most queries against a diagram — is forced onto the non-monotone fallback path.
+pub fn decompose_with_guides(
+    space: &FreeSpace,
+    margin: f64,
+    guides: &[f64],
+) -> Result<Decomposition, PathPlanError> {
+    build(space, margin, guides)
+}
+
+fn build(
+    space: &FreeSpace,
+    margin: f64,
+    guides: &[f64],
+) -> Result<Decomposition, PathPlanError> {
     if !margin.is_finite() || margin < 0.0 {
         return Err(PathPlanError::InvalidConfig("margin must be finite and >= 0"));
     }
@@ -77,7 +100,16 @@ pub fn decompose(space: &FreeSpace, margin: f64) -> Result<Decomposition, PathPl
         return Ok(Decomposition::default());
     }
     let edges = collect_edges(&workspace, &forbidden);
-    let xs = event_coordinates(&edges, ws);
+    let mut xs = event_coordinates(&edges, ws);
+    // Guides are only honoured strictly inside the eroded workspace: an event line on or outside
+    // the boundary would create a slab that lies entirely outside the free space.
+    for g in guides {
+        if g.is_finite() && *g > workspace.min.x && *g < workspace.max.x {
+            xs.push(*g);
+        }
+    }
+    sort_f64_ascending(&mut xs);
+    xs.dedup();
 
     // Degenerate free space: no cells at all.
     if xs.len() < 2 {
@@ -118,30 +150,33 @@ pub fn decompose(space: &FreeSpace, margin: f64) -> Result<Decomposition, PathPl
         connect_slabs(&mut builder, &slab_cells[k - 1], &slab_cells[k], x, true);
     }
 
-    let mut cells = builder.cells;
-    // Post-pass: a portal whose overlap collapsed to zero length carries no information and would
-    // make the funnel see a zero-width gate. Dropping it also drops the adjacency, which is what
-    // we want: two cells that touch only at a point are not connected.
+    let cells = builder.cells;
+    // A portal whose overlap collapsed to zero length carries no information and would make the
+    // funnel see a zero-width gate. Dropping it also drops the adjacency, which is what we want:
+    // two cells that touch only at a point are not connected.
     let mut remap: Vec<u32> = alloc::vec![u32::MAX; builder.portals.len()];
-    let mut kept: Vec<Portal> = Vec::with_capacity(builder.portals.len());
+    let mut portals: Vec<Portal> = Vec::with_capacity(builder.portals.len());
     for (old, portal) in builder.portals.iter().enumerate() {
         if portal.hi > portal.lo {
-            remap[old] = kept.len() as u32;
-            kept.push(*portal);
+            remap[old] = portals.len() as u32;
+            portals.push(*portal);
         }
     }
-    for cell in &mut cells {
-        cell.left = cell.left.and_then(|p| {
-            let new = remap[p as usize];
-            (new != u32::MAX).then_some(new)
-        });
-        cell.right = cell.right.and_then(|p| {
-            let new = remap[p as usize];
-            (new != u32::MAX).then_some(new)
-        });
-    }
 
-    Ok(Decomposition { xs, slab_cells, cells, portals: kept })
+    // Compressed adjacency. A cell's side can overlap several cells on the other side, so both
+    // sides are lists, not single portals.
+    let n = cells.len();
+    let mut per_cell_right: Vec<Vec<PortalId>> = alloc::vec![Vec::new(); n];
+    let mut per_cell_left: Vec<Vec<PortalId>> = alloc::vec![Vec::new(); n];
+    for (new_id, portal) in portals.iter().enumerate() {
+        let new_id = new_id as PortalId;
+        per_cell_right[portal.left as usize].push(new_id);
+        per_cell_left[portal.right as usize].push(new_id);
+    }
+    let right_index = SideIndex::build(n, |c| &per_cell_right[c as usize]);
+    let left_index = SideIndex::build(n, |c| &per_cell_left[c as usize]);
+
+    Ok(Decomposition { xs, slab_cells, cells, portals, right_index, left_index })
 }
 
 /// Every edge of every offset obstacle, plus the four workspace walls.
@@ -300,14 +335,15 @@ fn cell_from_gap(active: &[Edge], i: usize, lo_x: f64, hi_x: f64) -> Cell {
         br: Point2D::new(hi_x, lo_edge.map_or(0.0, |e| e.y_at(hi_x))),
         tr: Point2D::new(hi_x, hi_edge.map_or(0.0, |e| e.y_at(hi_x))),
         tl: Point2D::new(lo_x, hi_edge.map_or(0.0, |e| e.y_at(lo_x))),
-        left: None,
-        right: None,
     }
 }
 
 /// Joins the cells of two adjacent slabs across the event line at `x`, creating a portal for every
-/// pair with a positive-length vertical overlap. `attach_right` records the portal on the left
-/// cell's right side and the right cell's left side.
+/// pair with a positive-length vertical overlap.
+///
+/// One cell's side can overlap several on the other side, so this is a merge that can emit several
+/// portals for the same cell; the adjacency is built from the portal list afterwards, so nothing is
+/// recorded per cell here.
 fn connect_slabs(
     builder: &mut CellBuilder,
     left: &[CellId],
@@ -321,12 +357,8 @@ fn connect_slabs(
         let r = builder.cells[right[j] as usize].y_range_at(x);
         let lo = l.0.max(r.0);
         let hi = l.1.min(r.1);
-        if hi > lo {
-            let id = builder.push_portal(Portal { x, lo, hi, left: left[i], right: right[j] });
-            if attach_right {
-                builder.cells[left[i] as usize].right = Some(id);
-                builder.cells[right[j] as usize].left = Some(id);
-            }
+        if hi > lo && attach_right {
+            builder.push_portal(Portal { x, lo, hi, left: left[i], right: right[j] });
         }
         // Advance whichever cell ends first; equal ends advance both.
         if l.1 < r.1 {

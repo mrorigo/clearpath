@@ -34,6 +34,7 @@ extern crate std;
 
 pub mod decomp;
 pub mod error;
+pub mod funnel;
 pub mod geom;
 
 pub use error::{InvalidObstacleReason, PathPlanError};
@@ -47,4 +48,10 @@ pub use geom::{BoundingBox, Orientation, Point2D, Polygon};
 #[inline]
 pub(crate) fn sqrt(x: f64) -> f64 {
     libm::sqrt(x)
+}
+
+/// `ceil` without `std`.
+#[inline]
+pub(crate) fn ceil(x: f64) -> f64 {
+    libm::ceil(x)
 }
