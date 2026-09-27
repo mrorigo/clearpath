@@ -1,15 +1,15 @@
-# pathplan
+# clearpath
 
 Deterministic 2D obstacle-avoidance path planning and smooth cubic Bézier fitting, in `no_std` +
 `alloc`.
 
-Given a workspace, polygonal obstacles, and two endpoints, `pathplan` returns either a `C¹` chain
+Given a workspace, polygonal obstacles, and two endpoints, `clearpath` returns either a `C¹` chain
 of cubic Bézier segments or a rectilinear polyline. Every returned curve is collision-free with the
 configured margin, and the whole pipeline is deterministic: the same input produces the same output
 bits on the same target.
 
 ```rust
-use pathplan::{BoundingBox, Point2D, Polygon, PathPlanner, RouteRequest};
+use clearpath::{BoundingBox, Point2D, Polygon, PathPlanner, RouteRequest};
 
 let mut req = RouteRequest::new(
     BoundingBox::new(Point2D::new(0.0, 0.0), Point2D::new(10.0, 10.0)),
@@ -25,8 +25,46 @@ req.obstacles = vec![Polygon::new(vec![
 
 let mut planner = PathPlanner::new();
 let segments = planner.route_smooth(&req)?;
-# Ok::<(), pathplan::PathPlanError>(())
+# Ok::<(), clearpath::PathPlanError>(())
 ```
+
+## Origin and provenance
+
+This crate started life as `pathplan`, named after **Graphviz's `libpathplan`** — the C++
+library behind Graphviz routing, which finds a path around obstacles and then fits a smooth spline
+through it. That is the same problem this crate solves, and it is the origin of the name and of
+the ambition: the same job, in safe Rust, with `no_std`.
+
+**No code was copied, ported, or translated.** The two are related by problem, not by
+implementation, and the algorithms are materially different:
+
+| | Graphviz's `libpathplan` | here |
+| --- | --- | --- |
+| Finding the path | builds a visibility graph over obstacle vertices | decomposes the free space into a vertical (trapezoidal) decomposition |
+| Searching it | shortest path in that graph | A\* over cell adjacency, monotone in the sweep direction |
+| Shortening it | — | Lee–Preparata funnel: the taut string through a corridor of portals |
+| Fitting the curve | its own spline fitting | minimum-curvature tangent solve, clamped to admissible sets, verified against the exact clearance |
+
+The name changed to `clearpath` because `pathplan` describes the provenance rather than the
+guarantee, and because it is not how a Rust crate's name reads. `docs/SPEC.md` keeps the old name
+wherever the derivation is the point.
+
+**On the licence.** This crate is MIT OR Apache-2.0. That is sound because nothing was derived
+from Graphviz — the shared artefact is an idea, not code — but the distinction is a real one and
+worth confirming against Graphviz's own licence terms before publishing, particularly since the
+name was chosen partly *because* of where this project came from. If you want the lineage to be
+airtight, `docs/SPEC.md` §6 and §7.2 describe the algorithms concretely enough to check each one
+against its own source.
+
+**The algorithms this actually implements**, for anyone checking the lineage:
+
+* the vertical (trapezoidal) decomposition of a polygonal domain — standard computational
+  geometry;
+* Lee & Preparata, *Linear-time algorithms for shortest paths in planar graphs*, JCSS 1984 — the
+  funnel;
+* a minimum-curvature variational tangent solve (Schoenberg's natural-spline family), banded and
+  solved by Cholesky;
+* Shewchuk-style adaptive exact predicates for orientation and in-circle.
 
 ## How it works
 

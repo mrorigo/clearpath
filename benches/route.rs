@@ -8,14 +8,14 @@
 #![allow(missing_docs)] // the criterion macros generate items without docs
 
 use criterion::{Criterion, criterion_group, criterion_main};
-use pathplan::corridor::AdmissibleTangents;
-use pathplan::decomp::sweep::decompose_with_guides;
-use pathplan::funnel::cell_search::search;
-use pathplan::funnel::string_pull::string_pull;
-use pathplan::geom::{BoundingBox, Point2D, Polygon};
-use pathplan::spline::containment::clamp_and_repair;
-use pathplan::spline::solver::solve_tangents;
-use pathplan::{Config, PathPlanner, RouteRequest};
+use clearpath::corridor::AdmissibleTangents;
+use clearpath::decomp::sweep::decompose_with_guides;
+use clearpath::funnel::cell_search::search;
+use clearpath::funnel::string_pull::string_pull;
+use clearpath::geom::{BoundingBox, Point2D, Polygon};
+use clearpath::spline::containment::clamp_and_repair;
+use clearpath::spline::solver::solve_tangents;
+use clearpath::{Config, PathPlanner, RouteRequest};
 use std::time::Duration;
 
 const WORKSPACE: BoundingBox = BoundingBox {
@@ -79,7 +79,7 @@ fn bench_stages(c: &mut Criterion) {
         let space = req.free_space().unwrap();
         let guides = [req.start.point.x, req.goal.point.x];
         let decomp = decompose_with_guides(&space, req.config.margin, &guides).unwrap();
-        let mut scratch = pathplan::router::scratch::Scratch::default();
+        let mut scratch = clearpath::router::scratch::Scratch::default();
         let corridor = search(&decomp, req.start.point, req.goal.point, &mut scratch.search).unwrap();
         let path = string_pull(&decomp, &corridor, req.start.point, req.goal.point).unwrap();
         let admissible = AdmissibleTangents::build(&decomp, &corridor.cells, &path.knots).unwrap();

@@ -6,8 +6,10 @@
 //! answer means the inputs are genuinely degenerate rather than "close enough to look degenerate
 //! after rounding". That determinism is what `docs/SPEC.md` section 4.4 requires.
 //!
-//! The implementation is pure safe Rust: the two-term error of a product comes from
-//! [`f64::mul_add`], an intrinsic, not from `unsafe` pointer punning.
+//! The implementation is pure safe Rust: the two-term error of a product comes from Dekker's
+//! split-and-multiply over `f64`, not from `mul_add` (which is only in `core` when the target has a
+//! hardware FMA, and would make the predicate target-dependent) and not from `unsafe` pointer
+//! punning.
 
 use super::point::Point2D;
 

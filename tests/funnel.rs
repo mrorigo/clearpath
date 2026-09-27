@@ -4,11 +4,11 @@
 //! path that leaves the corridor, or that crosses an obstacle, fails. Nothing here trusts the
 //! funnel's own reasoning.
 
-use pathplan::decomp::sweep::decompose_with_guides;
-use pathplan::decomp::Decomposition;
-use pathplan::funnel::cell_search::{SearchScratch, search};
-use pathplan::funnel::string_pull::string_pull;
-use pathplan::geom::{BoundingBox, FreeSpace, Point2D, Polygon};
+use clearpath::decomp::sweep::decompose_with_guides;
+use clearpath::decomp::Decomposition;
+use clearpath::funnel::cell_search::{SearchScratch, search};
+use clearpath::funnel::string_pull::string_pull;
+use clearpath::geom::{BoundingBox, FreeSpace, Point2D, Polygon};
 use proptest::prelude::*;
 
 const WORKSPACE: BoundingBox = BoundingBox {
@@ -51,7 +51,7 @@ fn routed(obstacles: &[Polygon], margin: f64, start: Point2D, goal: Point2D) -> 
     decompose_with_guides(&space, margin, &[start.x, goal.x]).unwrap()
 }
 
-fn route(obstacles: &[Polygon], margin: f64, start: Point2D, goal: Point2D) -> (Decomposition, pathplan::funnel::string_pull::TautPath) {
+fn route(obstacles: &[Polygon], margin: f64, start: Point2D, goal: Point2D) -> (Decomposition, clearpath::funnel::string_pull::TautPath) {
     let decomp = routed(obstacles, margin, start, goal);
     let mut scratch = SearchScratch::default();
     let corridor = search(&decomp, start, goal, &mut scratch).expect("a route should exist");
@@ -77,7 +77,7 @@ fn check_route(obstacles: &[Polygon], margin: f64, start: Point2D, goal: Point2D
     assert_eq!(path.knots.first().copied(), Some(start), "path must start at the start point");
     assert_eq!(path.knots.last().copied(), Some(goal), "path must end at the goal point");
 
-    let corridor_cells: Vec<pathplan::decomp::CellId> = corridor.cells.clone();
+    let corridor_cells: Vec<clearpath::decomp::CellId> = corridor.cells.clone();
 
     let mut samples = 0usize;
     for seg in path.knots.windows(2) {
@@ -175,7 +175,7 @@ fn through_a_narrow_passage_with_a_margin() {
     // asserting otherwise would be asserting that the obstacle stack is infinite.
     let space = FreeSpace::new(WORKSPACE, obstacles.clone()).unwrap();
     let decomp = decompose_with_guides(&space, 5.0, &[]).unwrap();
-    let clearance = pathplan::Clearance::new(&obstacles, WORKSPACE, 5.0);
+    let clearance = clearpath::Clearance::new(&obstacles, WORKSPACE, 5.0);
     assert!(
         !clearance.is_free(p(65.0, 50.0)),
         "a margin of 5 must seal the 8-wide gap"

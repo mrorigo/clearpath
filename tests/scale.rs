@@ -1,8 +1,8 @@
 //! Scale and determinism of the decomposition. Not an assertion of the latency target: see
 //! `docs/SPEC.md` section 8.2 and the note there about the measured figures.
 
-use pathplan::decomp::sweep::decompose;
-use pathplan::geom::{BoundingBox, FreeSpace, Point2D, Polygon};
+use clearpath::decomp::sweep::decompose;
+use clearpath::geom::{BoundingBox, FreeSpace, Point2D, Polygon};
 use std::time::Instant;
 
 #[test]

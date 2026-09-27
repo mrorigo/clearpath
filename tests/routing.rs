@@ -3,9 +3,9 @@
 //! The properties here are the ones a caller actually depends on, and they are stated in terms of
 //! the public types only.
 
-use pathplan::geom::clearance::Clearance;
-use pathplan::geom::{BoundingBox, Point2D, Polygon};
-use pathplan::{
+use clearpath::geom::clearance::Clearance;
+use clearpath::geom::{BoundingBox, Point2D, Polygon};
+use clearpath::{
     Config, PathPlanner, PathPlanError, PortConstraint, Route, RouteKind, RouteRequest,
 };
 use proptest::prelude::*;
@@ -41,7 +41,7 @@ fn clearance_of(req: &RouteRequest) -> Clearance<'_> {
 }
 
 /// Section 4.2: C1 continuity, bitwise at the joints and to `1e-12` relative on the derivative.
-fn assert_c1(segments: &[pathplan::CubicBezierSegment]) {
+fn assert_c1(segments: &[clearpath::CubicBezierSegment]) {
     for w in segments.windows(2) {
         let (a, b) = (w[0], w[1]);
         assert_eq!(a.p3, b.p0, "joint point differs");
@@ -59,7 +59,7 @@ fn assert_c1(segments: &[pathplan::CubicBezierSegment]) {
 
 /// Section 4.1: the curve is in the free space, tested on the flattened polyline so the sampling
 /// density is a stated guarantee rather than a guess.
-fn assert_clear(req: &RouteRequest, segments: &[pathplan::CubicBezierSegment]) {
+fn assert_clear(req: &RouteRequest, segments: &[clearpath::CubicBezierSegment]) {
     let clearance = clearance_of(req);
     for s in segments {
         for q in s.flatten(1e-3) {
@@ -69,7 +69,7 @@ fn assert_clear(req: &RouteRequest, segments: &[pathplan::CubicBezierSegment]) {
 }
 
 /// The route starts and ends where it was asked to.
-fn assert_endpoints(req: &RouteRequest, segments: &[pathplan::CubicBezierSegment]) {
+fn assert_endpoints(req: &RouteRequest, segments: &[clearpath::CubicBezierSegment]) {
     let first = segments.first().expect("a route with no segments");
     let last = segments.last().unwrap();
     assert_eq!(first.p0, req.start.point);
@@ -99,7 +99,7 @@ fn open_space_is_a_straight_line() {
         let t = k as f64 / 64.0;
         let q = s.evaluate(t);
         assert!(
-            q.distance(pathplan::corridor::closest_point_on_segment(
+            q.distance(clearpath::corridor::closest_point_on_segment(
                 q,
                 req.start.point,
                 req.goal.point
@@ -320,7 +320,7 @@ fn a_smooth_route_is_actually_smooth() {
     let req = request(obstacles, p(5.0, 50.0), p(95.0, 50.0), 0.0);
     let mut planner = PathPlanner::new();
     let segments = planner.route_smooth(&req).unwrap();
-    let interior: Vec<&pathplan::CubicBezierSegment> =
+    let interior: Vec<&clearpath::CubicBezierSegment> =
         segments.iter().filter(|s| s.p1.distance(s.p0) > 1e-9).collect();
     assert!(
         !interior.is_empty(),

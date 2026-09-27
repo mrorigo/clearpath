@@ -4,9 +4,9 @@
 //! claim and the code cannot drift apart silently — and the per-stage breakdown says which
 //! allocations are worth removing, so a future pass has somewhere to start.
 
-use pathplan::funnel::cell_search::SearchScratch;
-use pathplan::geom::{BoundingBox, Point2D, Polygon};
-use pathplan::{Config, PathPlanner, RouteRequest};
+use clearpath::funnel::cell_search::SearchScratch;
+use clearpath::geom::{BoundingBox, Point2D, Polygon};
+use clearpath::{Config, PathPlanner, RouteRequest};
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -134,12 +134,12 @@ fn a_warm_query_allocates_less_than_a_cold_one() {
 /// decomposition is roughly half of them and scales with the number of event abscissae, while the
 /// rest are one small `Vec` per stage and barely move the latency.
 fn per_stage_allocation_breakdown() {
-    use pathplan::corridor::AdmissibleTangents;
-    use pathplan::decomp::sweep::decompose_with_guides;
-    use pathplan::funnel::cell_search::search;
-    use pathplan::funnel::string_pull::string_pull;
-    use pathplan::spline::containment::clamp_and_repair;
-    use pathplan::spline::solver::solve_tangents;
+    use clearpath::corridor::AdmissibleTangents;
+    use clearpath::decomp::sweep::decompose_with_guides;
+    use clearpath::funnel::cell_search::search;
+    use clearpath::funnel::string_pull::string_pull;
+    use clearpath::spline::containment::clamp_and_repair;
+    use clearpath::spline::solver::solve_tangents;
 
     for n in [10usize, 50] {
         let req = request(n);

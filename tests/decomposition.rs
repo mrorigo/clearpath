@@ -3,9 +3,9 @@
 //! Checked on a dense grid against a direct free-space predicate, so the gate does not depend on
 //! any of the decomposition's own reasoning.
 
-use pathplan::decomp::sweep::decompose;
-use pathplan::geom::predicates::{Orientation, orient2d};
-use pathplan::geom::{BoundingBox, FreeSpace, Point2D, Polygon};
+use clearpath::decomp::sweep::decompose;
+use clearpath::geom::predicates::{Orientation, orient2d};
+use clearpath::geom::{BoundingBox, FreeSpace, Point2D, Polygon};
 use proptest::prelude::*;
 
 const WORKSPACE: BoundingBox = BoundingBox {

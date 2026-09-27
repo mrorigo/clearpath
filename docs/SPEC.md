@@ -1,10 +1,10 @@
-# Specification: `pathplan`
+# Specification: `clearpath` (formerly `pathplan`)
 
 **Status:** Normative. This document replaces `docs/SPEC_DRAFT.md`.
 Where the draft was ambiguous or self-contradictory, the resolution is stated inline as
 **Resolution:** and listed in Appendix A.
 
-**Crate:** `pathplan`
+**Crate:** `clearpath`
 **License:** MIT OR Apache-2.0
 **Edition:** Rust 2024 (single edition; the draft's "2024 / 2021" is dropped — `Cargo.toml` pins 2024).
 **Target:** `#![no_std]` + `alloc` core. Optional `std` and `simd` features.
@@ -28,7 +28,7 @@ Where the draft was ambiguous or self-contradictory, the resolution is stated in
 
 ## 1. Executive Summary
 
-`pathplan` is a deterministic 2D obstacle-avoidance path planner and smooth spline fitter for
+`clearpath` is a deterministic 2D obstacle-avoidance path planner and smooth spline fitter for
 2D polygonal free space. Given a bounding workspace, polygonal obstacles, start/goal points and
 optional forced tangent directions, it produces either
 
@@ -38,7 +38,11 @@ optional forced tangent directions, it produces either
 Every returned curve is guaranteed collision-free with respect to the configured margin by
 construction, not by post-hoc checking.
 
-The library is intended as a modern, memory-safe replacement for Graphviz' `libpathplan`.
+The library is intended as a modern, memory-safe replacement for Graphviz' `libpathplan`. The crate
+was named `pathplan` after that library and has since been renamed to **`clearpath`**; this document
+keeps the old name where the derivation is the point. Nothing was copied or translated from
+Graphviz — the algorithms differ, and §6.2 and §6.3b record which ones were used instead. See the
+README's "Origin and provenance" for the same statement in full.
 
 ### 1.1 What "replacement" means, and what it does not
 
@@ -341,7 +345,7 @@ point is inside some cell of the corridor); §4.1 then rests on L1 and L2, not o
 ## 5. Crate layout
 
 ```
-pathplan/
+clearpath/
   Cargo.toml
   src/
     lib.rs            # public facade, re-exports, crate-level lints
@@ -378,7 +382,7 @@ pathplan/
   tests/
 ```
 
-`error.rs` and `scratch.rs` are additions to the draft; `pathplan::error` exists so that
+`error.rs` and `scratch.rs` are additions to the draft; `clearpath::error` exists so that
 `no_std` builds do not depend on the layout of `lib.rs`.
 
 ---

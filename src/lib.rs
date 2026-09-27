@@ -1,4 +1,4 @@
-//! `pathplan` — deterministic 2D obstacle-avoidance path planning and smooth spline fitting.
+//! `clearpath` — deterministic 2D obstacle-avoidance path planning and smooth spline fitting.
 //!
 //! See `docs/SPEC.md` for the normative specification this crate implements.
 //!
@@ -8,7 +8,7 @@
 //! # Example
 //!
 //! ```
-//! use pathplan::{BoundingBox, Point2D, Polygon};
+//! use clearpath::{BoundingBox, Point2D, Polygon};
 //!
 //! // A 2x2 square obstacle.
 //! let obstacle = Polygon::new(vec![

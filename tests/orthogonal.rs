@@ -3,8 +3,8 @@
 //! The contract is narrow on purpose: an axis-aligned polyline from the start to the goal, in the
 //! free space. Everything else — optimality, aesthetics — is not claimed.
 
-use pathplan::geom::{BoundingBox, Point2D, Polygon};
-use pathplan::{Config, PathPlanError, PathPlanner, PortConstraint, Route, RouteKind, RouteRequest};
+use clearpath::geom::{BoundingBox, Point2D, Polygon};
+use clearpath::{Config, PathPlanError, PathPlanner, PortConstraint, Route, RouteKind, RouteRequest};
 use proptest::prelude::*;
 
 const WORKSPACE: BoundingBox = BoundingBox {

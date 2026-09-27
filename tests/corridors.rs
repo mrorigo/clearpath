@@ -4,13 +4,13 @@
 //! Nothing here trusts the construction: the hull is tested against the obstacles directly, and the
 //! projection is tested to land back inside the set.
 
-use pathplan::decomp::sweep::decompose_with_guides;
-use pathplan::funnel::cell_search::{SearchScratch, search};
-use pathplan::funnel::string_pull::string_pull;
-use pathplan::geom::{FreeSpace, Point2D, Polygon};
-use pathplan::corridor::AdmissibleTangents;
+use clearpath::decomp::sweep::decompose_with_guides;
+use clearpath::funnel::cell_search::{SearchScratch, search};
+use clearpath::funnel::string_pull::string_pull;
+use clearpath::geom::{FreeSpace, Point2D, Polygon};
+use clearpath::corridor::AdmissibleTangents;
 use proptest::prelude::*;
-use pathplan::geom::BoundingBox;
+use clearpath::geom::BoundingBox;
 
 const WORKSPACE: BoundingBox = BoundingBox {
     min: Point2D { x: 0.0, y: 0.0 },
@@ -59,7 +59,7 @@ fn check(obstacles: &[Polygon], margin: f64, start: Point2D, goal: Point2D) {
     // The free-space predicate the margin model defines: a distance test, not a containment test,
     // because a taut path hugs what it wraps around and its knots sit exactly on obstacle
     // boundaries when `margin` is 0.
-    let clearance = pathplan::geom::clearance::Clearance::new(obstacles, WORKSPACE, margin);
+    let clearance = clearpath::geom::clearance::Clearance::new(obstacles, WORKSPACE, margin);
     let free = |q: Point2D| clearance.is_free(q);
 
     for i in 0..path.knots.len() {
@@ -198,7 +198,7 @@ fn the_zero_tangent_yields_the_taut_polyline() {
     let corridor = search(&decomp, a, b, &mut scratch).unwrap();
     let path = string_pull(&decomp, &corridor, a, b).unwrap();
     let admissible = AdmissibleTangents::build(&decomp, &corridor.cells, &path.knots).unwrap();
-    let clearance = pathplan::geom::clearance::Clearance::new(&obstacles, WORKSPACE, 0.0);
+    let clearance = clearpath::geom::clearance::Clearance::new(&obstacles, WORKSPACE, 0.0);
     let tangents = vec![Point2D::ZERO; path.knots.len()];
     let segments = admissible.control_points(&path.knots, &tangents, &clearance).unwrap();
     // A zero tangent makes each segment a straight line between consecutive knots.

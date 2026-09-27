@@ -100,7 +100,7 @@ impl Decomposition {
         self.portals.len()
     }
 
-    /// The ids of the cells in slab `k`, as a range into [`Decomposition::slab_cells`].
+    /// The ids of the cells in slab `k`, as a range into the decomposition's flat cell buffer.
     ///
     /// Flat rather than a `Vec` per slab: a decomposition has one slab per distinct event
     /// abscissa, so the nested form was one allocation per slab on every query.
