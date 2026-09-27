@@ -601,8 +601,8 @@ did not say what the system actually solved.
   construction and solve for curvature-continuous joints; the resulting system is still
   tridiagonal, solved with the same routine. When `c2` is off, `$C^2$` is neither claimed nor
   tested.
-* Tridiagonal solve is guarded: a zero or near-zero pivot falls back to the `$d_i$ seed rather
-  than producing `NaN`/`inf`.
+* The solve is guarded: a non-positive pivot falls back to the seeds rather than producing a
+  `NaN`.
 * With `n == 2` knots there are no interior unknowns and the result is one segment whose
   tangents are `$T_0, T_1` as above.
 
@@ -646,8 +646,8 @@ for i in 0..n: T[i] = project_onto_convex(A[i], T[i])
 * The chord fallback (`$T_i = 0` everywhere) corresponds to a straight line between consecutive
   knots and is reachable by setting `Config::repair_dampening` to a small value; it is not a
   separate code path.
-* Default `max_repair_iters = 16`, `repair_dampening = 0.5`. Both are `Config` fields;
-  `repair_dampening` must lie in `(0, 1)` and `max_repair_iters > 0`, else `InvalidConfig`.
+* Defaults: `max_repair_iters = 16`, `repair_dampening = 0.5`, `tangent_bias = 1.0`. `Config::validate`
+  reports each out-of-range field.
 
 
 ### 6.6 `spline::simd` (feature `simd`)
@@ -1028,6 +1028,15 @@ product question, one undecided algorithm) and closed them.
 | 39 | §6.4's convex corridor per taut segment | **Unbuildable.** A convex region containing a whole taut segment and contained in the free space does not generally exist: bounding by every cell the segment passes over-constrains the ends, and bounding per abscissa is not convex. Two implementations were built and both were wrong before the third worked | §6.4 rewritten as per-knot admissible tangent sets plus an exact hull test. The per-segment corridor is gone; §4.6 is re-expressed in the same terms |
 | 40 | The hull test sampled the midpoints of the four control-hull edges | A hull clipping an obstacle's corner passes a midpoint sample, and that is a collision. Found by the M5 property test on random fields | `Clearance::hull_is_free` is exact: every hull edge against every obstacle edge, plus every obstacle vertex for being inside the hull |
 | 41 | Cell attribution anchored on the segment's start point, then walked along the corridor's cell list | A knot is on the boundary of both the cell left and the cell entered, so anchoring there includes a cell that merely touches the endpoint; and the cell list is ordered by traversal, not abscissa, so a right-to-left route walks it backwards and collects cells from the other side of the segment | §6.4: attribution is an intersection test with no direction in it, anchored on the midpoint |
+| 43 | The system was called tridiagonal | It is pentadiagonal: the second differences couple five unknowns. A Thomas solve would silently solve a different, smoother problem | §6.5: banded Cholesky, with the row build derived from the terms' validity so the endpoints are right too |
+| 44 | `Config::default().tangent_bias = 0.0` | `lambda == 0` is *singular* — every constant tangent has zero curvature, so the minimum-curvature objective is flat along that whole line and the solve has no unique answer. Every route came out un-smoothed and the failure looked like a repair problem | §6.5: the default is 1.0, and zero is documented as returning the seeds |
+| 45 | `RouteRequest::clearance` eroded the workspace *and* passed the eroded box to `Clearance::new`, which erodes again | Not a safety bug — the obstacle test carries the margin — but the workspace bound was twice the margin, so endpoints near a wall were rejected as outside | §6.5: the un-eroded workspace goes in |
+| 46 | `Clearance::is_free` applied the margin to the workspace only | The obstacles are the caller's originals, so the margin was never applied to them at all, and a curve could sit `margin` inside the obstacle bound | §6.4: `is_free` is a distance test against the margin |
+| 47 | `hull_is_free` tested the hull's vertices for margin and its edges only for crossings | The crossing test is topological; it says nothing about distance. A hull with four clear vertices and an edge passing within `margin` of an obstacle passed, and the curve between those vertices was too close | §6.4: each hull edge is also checked for clearance to the margin, via every obstacle vertex's distance to it |
+| 48 | `hull_is_free` rejected a hull merely *touching* an obstacle | A taut path's knots lie exactly on obstacle boundaries, so the hull always shares an endpoint with an obstacle edge, and every route was refused | §6.4: proper crossings only, and strictly-inside only for obstacle vertices |
+| 49 | The repair damped all tangents towards zero | A control point poking a positive amount into an obstacle shrinks but never reaches the boundary, so the hull stays obstructed forever and one bad knot flattened the whole route | §6.5: the offending segment is zeroed specifically |
+| 50 | `AdmissibleSet::vertices` intersected only *consecutive* half-planes | The set is two cells' four planes each, not in cyclic order, so most corners were missed and the duplicates that survived made `project` return a point outside the set | §4.6: every pair is tried |
+| 51 | `CubicBezierSegment::tangent` | The derivative was written as a difference of basis terms, which does not reduce to `3(P1-P0)` at `t = 0`; the endpoint tangents were wrong | `B'(t) = 3(1-t)^2(P1-P0) + 6(1-t)t(P2-P1) + 3t^2(P3-P2)`, with a test at both ends |
 | 42 | `is_free` used `distance >= 0` | True for every point, including points inside an obstacle | `Clearance::is_free` distinguishes *strictly* inside (`contains` and a positive distance) from *on* the boundary, because at `margin == 0` a taut path's knots lie exactly on boundaries and the guarantee is `>= margin` |
 | 38 | The M4 gate asserted the taut path is in the free space | Wrong assertion: a taut path hugs the obstacles it wraps around, so with `margin == 0` its knots lie exactly on obstacle boundaries. A containment test rejects every useful route | §9.0: a distance-based clearance test (`>= margin`), which is the actual guarantee. L2, the corridor-membership test, stays a containment test because a cell boundary is not an obstacle |
 

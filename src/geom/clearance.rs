@@ -8,7 +8,7 @@
 use alloc::vec::Vec;
 
 use super::point::Point2D;
-use super::polygon::{BoundingBox, Polygon, segments_intersect};
+use super::polygon::{BoundingBox, Polygon, segments_cross_properly};
 use super::predicates::{Orientation, orient2d};
 
 /// The free space of the inflated domain, as a predicate.
@@ -20,12 +20,14 @@ pub struct Clearance {
     obstacles: Vec<Polygon>,
     /// The eroded workspace: a point must be inside this.
     workspace: BoundingBox,
+    /// The margin, which the obstacles are held off by.
+    margin: f64,
 }
 
 impl Clearance {
     /// Builds the predicate for the domain the planner used.
     pub fn new(obstacles: &[Polygon], workspace: BoundingBox, margin: f64) -> Self {
-        Self { obstacles: obstacles.to_vec(), workspace: workspace.eroded(margin) }
+        Self { obstacles: obstacles.to_vec(), workspace: workspace.eroded(margin), margin }
     }
 
     /// The eroded workspace.
@@ -43,17 +45,33 @@ impl Clearance {
     /// A distance test, not a containment test: at `margin == 0` a taut path's knots lie exactly on
     /// obstacle boundaries, and the guarantee is `>= margin`, so the boundary is in.
     pub fn is_free(&self, p: Point2D) -> bool {
-        self.workspace.contains(p)
-            && self.obstacles.iter().all(|o| {
-                let ring = o.vertices();
-                let d = distance_to_ring(p, ring);
-                // `Polygon::contains` reports the boundary as inside, and at `margin == 0` a taut
-                // path's knots lie exactly on boundaries. So the interior test has to be
-                // "strictly inside", which is `contains` *and* a positive distance — a point on the
-                // boundary has distance zero and an interior point does not.
-                let strictly_inside = o.contains(p) && d > 0.0;
-                !strictly_inside && d >= 0.0
-            })
+        // A tolerance on the workspace bound, for the same reason the obstacle test has one: a
+        // curve sampled at a knot that lies exactly on the eroded boundary can evaluate a fraction
+        // of an ulp outside it, and reporting that as a collision is a rounding artefact dressed up
+        // as a geometric fact.
+        let slack = 1e-9 * self.workspace.width().abs().max(self.workspace.height().abs()).max(1.0);
+        let ws = self.workspace;
+        if p.x < ws.min.x - slack
+            || p.x > ws.max.x + slack
+            || p.y < ws.min.y - slack
+            || p.y > ws.max.y + slack
+        {
+            return false;
+        }
+        // The margin is the *distance* an obstacle is held off by, so it is a distance test and not
+        // an outset geometry: the obstacles here are the caller's originals, and eroding the
+        // workspace alone would leave them un-grown. A small relative slack absorbs the rounding in
+        // `distance_to_ring` at exactly `margin`.
+        let slack = 1e-9 * self.margin.abs().max(1.0);
+        self.obstacles.iter().all(|o| {
+            let ring = o.vertices();
+            let d = distance_to_ring(p, ring);
+            // `Polygon::contains` reports the boundary as inside, and at `margin == 0` a taut path's
+            // knots lie exactly on boundaries. So the interior test has to be "strictly inside",
+            // which is `contains` *and* a positive distance.
+            let strictly_inside = o.contains(p) && d > 0.0;
+            !strictly_inside && d >= self.margin - slack
+        })
     }
 
     /// Whether the convex hull of `points` is in the free space.
@@ -63,27 +81,49 @@ impl Clearance {
     /// through.
     pub fn hull_is_free(&self, points: &[Point2D]) -> bool {
         let hull = convex_hull(points);
-        if hull.len() < 3 {
-            // A degenerate hull is its points; the caller has already checked them.
-            return hull.iter().all(|p| self.is_free(*p));
-        }
         for p in &hull {
             if !self.is_free(*p) {
                 return false;
             }
         }
+        if hull.len() < 2 {
+            return true;
+        }
         for obstacle in &self.obstacles {
             let ring = obstacle.vertices();
-            for v in ring {
-                if point_in_convex(&hull, *v) {
-                    return false;
+            for k in 0..hull.len() {
+                // The hull's closing polyline, which for a two-point hull is the segment itself.
+                // That case matters: a zero-tangent segment is exactly two points, and checking only
+                // its endpoints would accept a segment that passes through an obstacle.
+                let (c, d) = (hull[k], hull[(k + 1) % hull.len()]);
+                for i in 0..ring.len() {
+                    if segments_cross_properly(ring[i], ring[(i + 1) % ring.len()], c, d) {
+                        return false;
+                    }
+                }
+                // The margin is a *metric* property and the crossing test is topological, so the
+                // edges need their own clearance check. Without it a hull can have four clear
+                // vertices and an edge that passes within `margin` of an obstacle, and the curve
+                // between those vertices is then too close — which is the whole thing the check
+                // exists to prevent.
+                //
+                // For a segment that does not cross an obstacle edge, the closest approach to that
+                // edge is attained at one of its endpoints, so testing every obstacle *vertex*
+                // against the segment is sufficient.
+                let slack = 1e-9 * self.margin.abs().max(1.0);
+                for v in ring {
+                    let q = crate::corridor::closest_point_on_segment(*v, c, d);
+                    if q.distance(*v) < self.margin - slack {
+                        return false;
+                    }
                 }
             }
-            for i in 0..ring.len() {
-                let (a, b) = (ring[i], ring[(i + 1) % ring.len()]);
-                for k in 0..hull.len() {
-                    let (c, d) = (hull[k], hull[(k + 1) % hull.len()]);
-                    if segments_intersect(a, b, c, d) {
+            // A vertex *strictly* inside the hull means the obstacle is enclosed, or partly
+            // covered. On the boundary is contact, which the guarantee permits. Meaningless for a
+            // degenerate hull, so it is skipped there.
+            if hull.len() >= 3 {
+                for v in ring {
+                    if point_strictly_in_convex(&hull, *v) {
                         return false;
                     }
                 }
@@ -148,12 +188,15 @@ pub fn point_in_convex(poly: &[Point2D], p: Point2D) -> bool {
     if poly.len() < 3 {
         return poly.contains(&p);
     }
-    for i in 0..poly.len() {
-        if orient2d(poly[i], poly[(i + 1) % poly.len()], p) == Orientation::Clockwise {
-            return false;
-        }
-    }
-    true
+    (0..poly.len())
+        .all(|i| orient2d(poly[i], poly[(i + 1) % poly.len()], p) != Orientation::Clockwise)
+}
+
+/// Whether `p` is strictly inside the convex polygon `poly`; the boundary does not count.
+pub fn point_strictly_in_convex(poly: &[Point2D], p: Point2D) -> bool {
+    poly.len() >= 3
+        && (0..poly.len())
+            .all(|i| orient2d(poly[i], poly[(i + 1) % poly.len()], p) == Orientation::CounterClockwise)
 }
 
 #[cfg(test)]

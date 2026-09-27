@@ -115,21 +115,36 @@ impl AdmissibleSet {
     }
 
     /// The set's vertices, in counter-clockwise order.
+    ///
+    /// Every *pair* of half-planes is tried, not just consecutive ones. The set is the
+    /// intersection of two cells' four planes each, and those eight are not in a cyclic order
+    /// around the region, so consecutive pairs miss most of the corners — and the duplicates that
+    /// survive make the projection below return a point outside the set.
     pub fn vertices(&self) -> Vec<Point2D> {
         let n = self.planes.len();
         let mut out: Vec<Point2D> = Vec::with_capacity(n);
         for i in 0..n {
-            let p = self.planes[i];
-            let q = self.planes[(i + 1) % n];
-            let det = p.a * q.b - q.a * p.b;
-            if det.abs() < 1e-12 {
-                continue; // Parallel: no vertex.
-            }
-            let v = Point2D::new((p.b * q.c - q.b * p.c) / det, (q.a * p.c - p.a * q.c) / det);
-            if self.planes.iter().all(|r| r.value(v) >= r.slack()) {
-                out.push(v);
+            for j in (i + 1)..n {
+                let (p, q) = (self.planes[i], self.planes[j]);
+                let det = p.a * q.b - q.a * p.b;
+                if det.abs() < 1e-12 {
+                    continue; // Parallel or coincident: no vertex from this pair.
+                }
+                let v = Point2D::new(
+                    (p.b * q.c - q.b * p.c) / det,
+                    (q.a * p.c - p.a * q.c) / det,
+                );
+                if !v.is_finite() {
+                    continue;
+                }
+                if self.planes.iter().all(|r| r.value(v) >= r.slack())
+                    && !out.iter().any(|w| w.distance(v) < 1e-9)
+                {
+                    out.push(v);
+                }
             }
         }
+        out.sort_by(|a, b| a.x.total_cmp(&b.x).then_with(|| a.y.total_cmp(&b.y)));
         out
     }
 
@@ -142,8 +157,14 @@ impl AdmissibleSet {
         if self.contains(t) {
             return t;
         }
+        // The closest point of a convex polygon to an external point lies either on an edge or at
+        // a vertex, and a vertex is covered by both of its edges — so the edges alone suffice, and
+        // enumerating the vertices as well only guards against a degenerate polygon.
         let v = self.vertices();
-        let mut best = t;
+        if v.is_empty() {
+            return Point2D::ZERO;
+        }
+        let mut best = v[0];
         let mut best_d2 = f64::INFINITY;
         for i in 0..v.len() {
             let (a, b) = (v[i], v[(i + 1) % v.len()]);
@@ -154,8 +175,12 @@ impl AdmissibleSet {
                 best = q;
             }
         }
-        if v.is_empty() {
-            return Point2D::ZERO;
+        for w in &v {
+            let d2 = w.distance_squared(t);
+            if d2 < best_d2 {
+                best_d2 = d2;
+                best = *w;
+            }
         }
         best
     }

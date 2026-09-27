@@ -35,12 +35,19 @@ extern crate std;
 pub mod decomp;
 pub mod error;
 pub mod corridor;
+pub mod router;
 pub mod funnel;
 pub mod spline;
 pub mod geom;
 
+pub use corridor::{AdmissibleSet, AdmissibleTangents};
 pub use error::{InvalidObstacleReason, PathPlanError};
-pub use geom::{BoundingBox, Orientation, Point2D, Polygon};
+pub use geom::clearance::Clearance;
+pub use geom::{BoundingBox, FreeSpace, Orientation, Point2D, Polygon};
+pub use router::{
+    Config, OrthogonalPolyline, PathPlanner, PortConstraint, Route, RouteKind, RouteRequest,
+};
+pub use spline::CubicBezierSegment;
 
 /// `sqrt` without `std`.
 ///

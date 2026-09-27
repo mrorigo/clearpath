@@ -315,6 +315,28 @@ fn is_self_intersecting(vertices: &[Point2D]) -> bool {
     false
 }
 
+/// Whether the two closed segments cross *transversally*: they meet, and no endpoint of either
+/// lies on the other.
+///
+/// This is the test a containment check wants, and the difference from [`segments_intersect`] is
+/// not academic: a taut path's knots lie exactly on obstacle boundaries, so a hull that reaches its
+/// endpoint shares that endpoint with the obstacle's edge. Touching is allowed — the guarantee is
+/// `>= margin` — and only a genuine crossing is a collision.
+pub fn segments_cross_properly(a0: Point2D, a1: Point2D, b0: Point2D, b1: Point2D) -> bool {
+    if a0 == b0 || a0 == b1 || a1 == b0 || a1 == b1 {
+        return false;
+    }
+    if !segments_intersect(a0, a1, b0, b1) {
+        return false;
+    }
+    // A T-junction — one segment's endpoint in the interior of the other — is contact, not a
+    // crossing.
+    !on_segment(a0, a1, b0)
+        && !on_segment(a0, a1, b1)
+        && !on_segment(b0, b1, a0)
+        && !on_segment(b0, b1, a1)
+}
+
 /// Whether the closed segments `a0a1` and `b0b1` share at least one point, including touching.
 pub fn segments_intersect(a0: Point2D, a1: Point2D, b0: Point2D, b1: Point2D) -> bool {
     let d1 = orient2d(a0, a1, b0);
