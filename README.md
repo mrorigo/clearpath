@@ -1,5 +1,8 @@
 # clearpath
 
+[![CI](https://github.com/mrorigo/clearpath/actions/workflows/ci.yml/badge.svg)](https://github.com/mrorigo/clearpath/actions/workflows/ci.yml)
+[![Slop Gate](https://github.com/mrorigo/clearpath/actions/workflows/slop-gate.yml/badge.svg)](https://github.com/mrorigo/clearpath/actions/workflows/slop-gate.yml)
+
 Deterministic 2D obstacle-avoidance path planning and smooth cubic Bézier fitting, in `no_std` +
 `alloc`.
 
