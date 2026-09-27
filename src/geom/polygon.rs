@@ -51,6 +51,16 @@ impl BoundingBox {
         p.x >= self.min.x && p.x <= self.max.x && p.y >= self.min.y && p.y <= self.max.y
     }
 
+    /// The smallest box containing this one and `p`.
+    #[inline]
+    pub fn with(mut self, p: Point2D) -> Self {
+        self.min.x = self.min.x.min(p.x);
+        self.min.y = self.min.y.min(p.y);
+        self.max.x = self.max.x.max(p.x);
+        self.max.y = self.max.y.max(p.y);
+        self
+    }
+
     /// The four corners in counter-clockwise order, starting at `min`.
     pub fn corners(&self) -> [Point2D; 4] {
         [

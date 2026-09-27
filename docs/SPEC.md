@@ -303,37 +303,27 @@ practical guarantee.
 `f64`, not `f64::mul_add`, because `mul_add` is only in `core` when the target has a hardware FMA
 — relying on it would make the predicate silently target-dependent, which section 4.4 forbids.
 
-### 4.6 Shared-tangent clamping (the multi-cell rule)
+### 4.6 Shared-tangent clamping
 
-An interior knot `$k_i$ is shared by exactly two segments, `$S_{i-1}$` and `$S_i`, and their
-corridors `$C_{i-1}$`, `$C_i$ are *different* convex polygons. A single tangent `$T_i` serves
-both. This is a genuine constraint, not a detail, and the draft left it implicit.
-
-> **Clamp rule.** For each interior knot, the admissible set is
-> `$A_i = C_{i-1} \cap C_i$`. Because the corridors are built to share the portal at `$k_i`
-> (§6.4), `$k_i \in A_i$ and `$A_i` is non-empty; it is a convex polygon. The tangent `$T_i`
-> must satisfy `$k_i + T_i/3 \in A_i$ (from `$S_i$`) **and** `$k_i - T_i/3 \in A_i` (from
-> `$S_{i-1}$`)`, which is exactly
-> `$k_i \pm T_i/3 \in A_i \iff T_i/3 \in A_i - k_i$`, i.e. `$T_i \in 3\,(A_i - k_i)$` — a convex
-> region symmetric about the origin.
+An interior knot `$k_i$` is shared by exactly two segments, and their adjacent cells differ, so a
+single tangent `$T_i$` has to satisfy both. The draft's formulation put this in terms of convex
+corridors and an intersection `$C_{i-1} \cap C_i`; §6.4 replaces that with the admissible set
+`$A_i$` of that section, which is the same idea — one convex region per knot, containing the zero
+tangent — expressed directly in tangent space rather than as an intersection of two per-segment
+regions that turn out not to exist.
 
 Consequences:
 
-* Clamping is done on the *tangent*, never on an individual control point. Repairs (§6.5) and
-  the containment projection both operate on `$T_i$ in this region, so `$C^1$` survives every
-  repair by construction. This is why repair cannot be per-segment.
-* Projection onto `$A_i - k_i$ is a single well-defined operation: closest point of a convex
-  polygon to a point, found by the standard "max over violated half-planes" walk using exact
-  `orient2d`. No iteration, no tolerance ladder.
-* End knots have a single incident corridor, so the admissible set is `$3\,(C_0 - k_0)$` and
-  the same rule applies. This is what makes a `PortConstraint::direction` satisfiable: the
-  direction is used if the resulting tangent is in the admissible set, otherwise the projection
-  is taken and the requested direction is *not* honoured exactly. A caller that needs an exact
-  direction must supply a `margin`/geometry where it is achievable. This is documented
+* Clamping is on the tangent, never on an individual control point. `$C^1$` survives every repair
+  because `$T_i$` is a single shared value, not a per-segment quantity.
+* Projection onto `$A_i$` is a single well-defined operation, found over the region's vertices. No
+  tolerance ladder.
+* End knots have one incident cell on one side, so `$A_0$ and `$A_{n-1}$` use that cell on both
+  sides. A knot whose set is `{0}` admits only the zero tangent: both neighbouring cells pinch there,
+  and the segment degenerates to a straight chord. That is a legitimate, if angular, result.
+* A requested `PortConstraint::direction` is honoured only if the resulting tangent is admissible;
+  otherwise the projection is taken and the direction is not met exactly. That is documented
   behaviour, not an error.
-* If a knot's admissible set is `{0}` (both corridors pinch at the knot), `$T_i = 0` and the two
-  segments are straight chords meeting at `$k_i` — a legitimate, if visually angular, result.
-  The degenerate-derivative clause of §4.2 covers it.
 
 ### 4.7 Required lemma (funnel validity)
 
@@ -525,38 +515,54 @@ that corridor.
 * Scratch buffers for the funnel state are passed in by the caller; the inner loop performs no
   allocation. The corridor from (a) is already owned by the caller, so (b) never allocates.
 
-### 6.4 `corridor`
+### 6.4 `corridor`: admissible tangents
 
-**The corridor is derived from the cells the taut segment passes through, not from a fresh
-clip of the obstacles.** `margin` is not applied here again (section 3.3); the draft's
-"inflate the segment by `margin` and re-clip" step is deleted.
+**This module was originally specified as one convex "corridor" per taut segment, and that is
+unbuildable.** The specification replaced the whole thing with per-knot admissible tangent sets; the
+reason is worth recording, because the failure is structural rather than a bug:
 
-For each taut segment `(k_i, k_{i+1})`:
+* A convex region that contains a whole taut segment *and* is contained in the free space does not
+  generally exist. The region has to bound itself by every cell the segment passes through, but the
+  segment's own height varies across the region's abscissa range, so a cell traversed only near the
+  far end bounds the near end too. The two requirements pull in opposite directions.
+* Bounding only by the cells the segment touches *at that abscissa* is correct but **not convex**,
+  and convexity is exactly what the Bezier hull property needs.
 
-1. Collect the cells of the corridor whose closure the segment meets, in order. The segment
-   lies in the union of these cells by L2, so the set is well defined and contiguous.
-2. For each such cell, take the sub-region of the cell on the taut segment's side of the cell's
-   boundary edges, bounded by the taut segment itself. This "slab" is convex, being the
-   intersection of a convex cell with two half-planes.
-3. The corridor for the segment is the union of those slabs' **convex hull**, computed as the
-   convex hull of the union of their vertex sets, not the union of the hulls. The union of two
-   convex sets is not convex; the hull of the union is, and is still a subset of the offset free
-   space only if the cells are, so the hull is taken over the cells' *common* region — namely
-   the hull of the portal-to-portal envelope, which the slabs all contain.
+What is actually required is local. The two control points `k + T/3` and `k' - T'/3` sit next to
+the knots, so only the cells *adjacent to the knots* constrain the tangents. Those are single convex
+cells, and intersecting two of them — one translated forwards by `k`, one backwards — gives a convex
+admissible set
 
-   *Resolution:* this is the one place the draft's "hull of the free-space component" is not
-   enough, because the per-cell slabs are not nested. The implementation computes the hull of
-   the union of slab vertices; since the slabs form a chain joined at portals and each slab is
-   contained in its cell, the hull of the chain is contained in the hull of the cells, and the
-   cells' union is within the offset free space. The M5 gate asserts the containment directly
-   rather than relying on this argument.
-* Consecutive corridors share the portal at the common knot; this is what makes
-  `$A_i = C_{i-1} \cap C_i \ne \emptyset` (section 4.6) hold.
-* Degenerate case: a corridor of zero area. This is legal — it is what a taut string pinned
-  tightly between two obstacles looks like. It forces `$T_i = 0` there and the segment
-  degenerates to a straight line (section 4.6). It is not an error.
-* Convex hull construction uses the robust `orient2d` comparator, so no `f64::atan2` sort key
-  and no epsilon-based sort is permitted.
+$$A_i = 3\,(E_i - k_i) \;\cap\; 3\,(k_i - W_i)$$
+
+where `$E_i$` is the cell segment `$i$` leaves `$k_i$` in and `$W_i$` the cell segment `$i-1$`
+arrives at `$k_i$ in. Both cells contain `$k_i$`, so `$0 \in A_i$` always, and `$A_i$ is an
+intersection of eight half-planes. `AdmissibleSet::project` is the closest-point projection onto
+that region, found over its vertices.
+
+Membership is tested with a slack proportional to the edge length, not against zero: a knot is a
+portal endpoint, and a cell's edge is a line through two corners that may be the same point reached
+by a different route, so "on the boundary" can evaluate to a small negative number. Rejecting on
+that is rejecting on rounding.
+
+The middle of the curve is not constrained by any local construction, so it is **checked rather than
+argued**: `Clearance::hull_is_free` takes the convex hull of a segment's four control points and
+tests it exactly against the obstacles — every hull edge against every obstacle edge, and every
+obstacle vertex for being inside the hull. Combined with the hull property, a clear hull is a clear
+curve. An earlier version sampled the midpoints of the four hull edges and a hull clipping an
+obstacle's corner passed it; that is a collision, and the exact test is the fix.
+
+**Cell attribution.** For each segment, the cells are those the segment passes through over a
+*positive length*, found by intersecting the segment (affine in `x`) with each cell's slab and
+keeping a cell whose overlap has non-zero extent. Two rejections here, both of which produced
+plausible-looking wrong answers:
+
+* Anchoring the search on the segment's midpoint, not on `a`. A knot lies on the boundary of the
+  cell being left as well as the one being entered, so anchoring at `a` picks up a cell that merely
+  touches the endpoint, whose boundary then bounds the whole corridor.
+* Not walking the corridor's cell list. The list is ordered by *traversal*, not abscissa, so a
+  right-to-left route walks it backwards and the cells it collects belong to the other side of the
+  segment. The intersection test has no direction in it.
 
 ### 6.5 `spline`
 
@@ -1019,5 +1025,9 @@ product question, one undecided algorithm) and closed them.
 | 35 | A cell has one left portal and one right portal | A cell's side can overlap *several* cells on the other side, so the portal is overwritten and the adjacency is lost | §6.3a: both sides are lists, held in two compressed lists so there is no per-cell allocation |
 | 36 | The funnel's portal `left`/`right` were assigned once, globally, from the corridor's overall direction | A corridor is not necessarily monotone in x — the cell graph fans out — so half the portals can be entered in the opposite direction to the other half, and the funnel then commits knots from the wrong chain. The result is a path that looks plausible and leaves the corridor | §6.3b: the orientation is carried per portal, and the corridor is made monotone by construction (§6.3a) so the case does not arise in the first place |
 | 37 | The funnel's scan restarted at the length of the tightened chain | Off by however many times the sides were retightened, i.e. one portal too far. A knot at a slot's end is dropped and the next segment crosses the obstacle | §6.3b: the sides record the portal that *produced* them, and the scan restarts at that portal plus one. Pinned by `the_funnel_touches_both_ends_of_a_slot` |
+| 39 | §6.4's convex corridor per taut segment | **Unbuildable.** A convex region containing a whole taut segment and contained in the free space does not generally exist: bounding by every cell the segment passes over-constrains the ends, and bounding per abscissa is not convex. Two implementations were built and both were wrong before the third worked | §6.4 rewritten as per-knot admissible tangent sets plus an exact hull test. The per-segment corridor is gone; §4.6 is re-expressed in the same terms |
+| 40 | The hull test sampled the midpoints of the four control-hull edges | A hull clipping an obstacle's corner passes a midpoint sample, and that is a collision. Found by the M5 property test on random fields | `Clearance::hull_is_free` is exact: every hull edge against every obstacle edge, plus every obstacle vertex for being inside the hull |
+| 41 | Cell attribution anchored on the segment's start point, then walked along the corridor's cell list | A knot is on the boundary of both the cell left and the cell entered, so anchoring there includes a cell that merely touches the endpoint; and the cell list is ordered by traversal, not abscissa, so a right-to-left route walks it backwards and collects cells from the other side of the segment | §6.4: attribution is an intersection test with no direction in it, anchored on the midpoint |
+| 42 | `is_free` used `distance >= 0` | True for every point, including points inside an obstacle | `Clearance::is_free` distinguishes *strictly* inside (`contains` and a positive distance) from *on* the boundary, because at `margin == 0` a taut path's knots lie exactly on boundaries and the guarantee is `>= margin` |
 | 38 | The M4 gate asserted the taut path is in the free space | Wrong assertion: a taut path hugs the obstacles it wraps around, so with `margin == 0` its knots lie exactly on obstacle boundaries. A containment test rejects every useful route | §9.0: a distance-based clearance test (`>= margin`), which is the actual guarantee. L2, the corridor-membership test, stays a containment test because a cell boundary is not an obstacle |
 

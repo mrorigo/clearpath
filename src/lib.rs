@@ -34,7 +34,9 @@ extern crate std;
 
 pub mod decomp;
 pub mod error;
+pub mod corridor;
 pub mod funnel;
+pub mod spline;
 pub mod geom;
 
 pub use error::{InvalidObstacleReason, PathPlanError};
