@@ -44,8 +44,159 @@ impl FreeSpace {
     }
 }
 
+/// A line as `(slope, intercept)`.
+pub type Line = (f64, f64);
+
+/// Whether the segment `a..b` lies inside the band between `lower` and `upper` over
+/// `[x0, x1]`.
+///
+/// Everything here is affine in `x`, so the question is a pair of half-interval intersections
+/// rather than a search: the segment is in the band where `y_segment - lower >= 0` and
+/// `upper - y_segment >= 0`, and each of those is affine.
+///
+/// This exists because sampling a segment to decide whether it is inside a region is a *sample*,
+/// not a proof, and the sample density that makes it convincing over a 1000-unit segment is
+/// expensive enough to dominate the query. A cell of the decomposition is a trapezoid, so its
+/// vertical bounds are lines, and the containment question is exact in closed form.
+pub fn segment_within_band(
+    a: Point2D,
+    b: Point2D,
+    lower: Line,
+    upper: Line,
+    x0: f64,
+    x1: f64,
+) -> bool {
+    let (u, v) = (x0.min(x1), x0.max(x1));
+    if u > v {
+        return false;
+    }
+    let slope = if b.x == a.x { 0.0 } else { (b.y - a.y) / (b.x - a.x) };
+    let segment = (slope, a.y - slope * a.x);
+    above(segment, lower, u, v) && above(upper, segment, u, v)
+}
+
+/// Whether `probe >= bound` throughout `[lo, hi]`, both affine.
+///
+/// The difference of the two lines is affine, so its minimum over the interval is at an endpoint
+/// and the test is two evaluations. Dividing for a root and comparing against it does not work: a
+/// segment that *starts* exactly on a cell edge makes the root land on the endpoint to within a
+/// rounding error in the wrong direction, and the containment test then fails for a segment that is
+/// exactly on the boundary — which is the case the whole margin model is built to allow.
+fn above(probe: Line, bound: Line, lo: f64, hi: f64) -> bool {
+    let m = probe.0 - bound.0;
+    let c = probe.1 - bound.1;
+    let at = |x: f64| {
+        // A tolerance proportional to the magnitudes involved, so it is a distance rather than a
+        // count of ulps. It is needed because both lines are *reconstructions*: a segment endpoint
+        // that lies exactly on a cell edge is on it bit for bit, but re-evaluating the segment as
+        // `slope * x + intercept` at that same abscissa can come out a fraction of an ulp the other
+        // side. Admitting a boundary tie is the safe direction — the margin model already allows a
+        // curve to touch what it was pushed off.
+        let v = m * x + c;
+        let scale = m.abs() * x.abs() + c.abs() + 1.0;
+        v >= -1e-9 * scale
+    };
+    if m >= 0.0 {
+        at(lo)
+    } else {
+        at(hi)
+    }
+}
+
 /// Tolerance used only for non-topological "is this effectively zero" tests.
 ///
 /// Never used for orientation, containment, or ordering decisions — those go through
 /// [`predicates::orient2d`], which is exact.
 pub const EPS: f64 = 1e-12;
+
+#[cfg(test)]
+mod band_tests {
+    use super::*;
+
+    fn line(m: f64, b: f64) -> Line {
+        (m, b)
+    }
+
+    #[test]
+    fn a_segment_inside_a_band_is_accepted() {
+        assert!(segment_within_band(
+            Point2D::new(0.0, 5.0),
+            Point2D::new(10.0, 7.0),
+            line(0.0, 0.0),
+            line(0.0, 10.0),
+            0.0,
+            10.0
+        ));
+    }
+
+    #[test]
+    fn a_segment_leaving_the_band_is_rejected() {
+        assert!(!segment_within_band(
+            Point2D::new(0.0, 5.0),
+            Point2D::new(10.0, 15.0),
+            line(0.0, 0.0),
+            line(0.0, 10.0),
+            0.0,
+            10.0
+        ));
+    }
+
+    /// The case that was failing: a segment whose endpoint lies *exactly* on a cell edge, so the
+    /// containment is a tie at that abscissa.
+    #[test]
+    fn a_segment_starting_exactly_on_the_lower_bound_is_accepted() {
+        let a = Point2D::new(15.769401554340265, 77.23059844565974);
+        let b = Point2D::new(90.0, 90.0);
+        let lower = line(0.0, 77.23059844565974);
+        let upper = line(0.0, 97.76940155434026);
+        assert!(segment_within_band(a, b, lower, upper, 15.769401554340265, 16.230598445659734));
+    }
+
+    /// The same, with a sloped lower bound, which is where a root comparison loses a ULP.
+    #[test]
+    fn a_segment_starting_exactly_on_a_sloped_bound_is_accepted() {
+        let a = Point2D::new(1.0, 1.0);
+        let b = Point2D::new(9.0, 9.0);
+        // The lower bound is the line y = x, which `a` lies on exactly.
+        assert!(segment_within_band(a, b, line(1.0, 0.0), line(0.0, 20.0), 1.0, 9.0));
+    }
+
+    #[test]
+    fn a_segment_touching_a_bound_is_accepted_either_side() {
+        let a = Point2D::new(0.0, 5.0);
+        let b = Point2D::new(10.0, 5.0);
+        assert!(segment_within_band(a, b, line(0.0, 5.0), line(0.0, 9.0), 0.0, 10.0));
+        assert!(segment_within_band(a, b, line(0.0, 1.0), line(0.0, 5.0), 0.0, 10.0));
+    }
+
+    #[test]
+    fn a_vertical_segment_is_tested_by_its_ordinate_range() {
+        // A vertical segment's abscissa range is a single value, but its *ordinate* range is the
+        // whole segment, so both endpoints have to be inside the band.
+        assert!(segment_within_band(
+            Point2D::new(5.0, 2.0),
+            Point2D::new(5.0, 8.0),
+            line(0.0, 1.0),
+            line(0.0, 9.0),
+            5.0,
+            5.0
+        ));
+        assert!(!segment_within_band(
+            Point2D::new(5.0, 0.0),
+            Point2D::new(5.0, 8.0),
+            line(0.0, 1.0),
+            line(0.0, 9.0),
+            5.0,
+            5.0
+        ));
+    }
+
+    #[test]
+    fn a_partial_range_is_tested_only_where_it_is_asked() {
+        // Over [0, 1] the segment is inside; over the whole range it is not.
+        let a = Point2D::new(0.0, 0.5);
+        let b = Point2D::new(10.0, 5.0);
+        assert!(segment_within_band(a, b, line(0.0, 0.0), line(0.0, 10.0), 0.0, 1.0));
+        assert!(!segment_within_band(a, b, line(0.0, 0.0), line(0.0, 1.0), 0.0, 10.0));
+    }
+}

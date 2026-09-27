@@ -59,8 +59,3 @@ pub(crate) fn sqrt(x: f64) -> f64 {
     libm::sqrt(x)
 }
 
-/// `ceil` without `std`.
-#[inline]
-pub(crate) fn ceil(x: f64) -> f64 {
-    libm::ceil(x)
-}

@@ -13,7 +13,8 @@ use super::Corridor;
 use crate::decomp::Decomposition;
 use crate::error::PathPlanError;
 use crate::geom::point::Point2D;
-use crate::ceil;
+use crate::geom::{Line, segment_within_band};
+use crate::geom::EPS;
 
 /// The taut string through a corridor: the ordered knots, including `start` and `goal`.
 ///
@@ -204,33 +205,7 @@ pub fn string_pull(
     Ok(path)
 }
 
-/// Whether every point of the polyline lies inside one of `cells`.
-fn inside_corridor(
-    decomp: &Decomposition,
-    cells: &[crate::decomp::CellId],
-    knots: &[Point2D],
-) -> bool {
-    // Two samples per unit length: the failure this guards against is a segment cutting across an
-    // obstacle edge, so the density only has to be fine enough to hit the edge.
-    for seg in knots.windows(2) {
-        let steps = (ceil(seg[0].distance(seg[1]) * 2.0) as usize).max(1);
-        for k in 0..=steps {
-            // The endpoint has to be taken verbatim rather than lerped to: `a + (b - a) * 1.0` is
-            // not always exactly `b`, and a knot that lands a few ULP outside a cell's abscissa
-            // fails the exact containment test. The knots are portal endpoints, which are exact.
-            let p = if k == steps { seg[1] } else { seg[0].lerp(seg[1], k as f64 / steps as f64) };
-            if !cells.iter().any(|c| decomp.cells()[*c as usize].contains(p)) {
-                return false;
-            }
-        }
-    }
-    true
-}
-
-/// Removes knots that add nothing: duplicates and points collinear with their neighbours.
-///
-/// A collinear interior knot is redundant, and leaving it in would make Stage 4 emit a spline
-/// segment that is a straight line, and would make the section 9.3 straight-line test ambiguous.
+/// Removes knots that add nothing: exact duplicates, and points collinear with their neighbours.
 fn drop_redundant_knots(mut knots: Vec<Point2D>) -> Result<TautPath, PathPlanError> {
     if knots.len() < 2 {
         return Err(PathPlanError::NoPathFound);
@@ -239,15 +214,14 @@ fn drop_redundant_knots(mut knots: Vec<Point2D>) -> Result<TautPath, PathPlanErr
     // expected rather than exceptional.
     knots.dedup();
     if knots.len() < 2 {
-        // Start and goal coincide after dedup: the caller should have rejected this earlier, but
-        // reporting it here keeps the funnel total.
         return Ok(TautPath { knots });
     }
     let mut out: Vec<Point2D> = Vec::with_capacity(knots.len());
     out.push(knots[0]);
     for w in knots.windows(3) {
         let (a, b, c) = (w[0], w[1], w[2]);
-        let degenerate = (b - a).is_zero() || (c - b).is_zero() || (b - a).cross(c - b).abs() <= 0.0;
+        let degenerate =
+            (b - a).is_zero() || (c - b).is_zero() || (b - a).cross(c - b).abs() <= 0.0;
         if !degenerate {
             out.push(b);
         }
@@ -255,6 +229,87 @@ fn drop_redundant_knots(mut knots: Vec<Point2D>) -> Result<TautPath, PathPlanErr
     out.push(knots[knots.len() - 1]);
     out.dedup();
     Ok(TautPath { knots: out })
+}
+
+/// Whether every segment of the polyline lies inside the union of `cells`.
+///
+/// **Analytic, not sampled.** The previous version sampled each segment twice per unit of length
+/// and asked each sample whether any corridor cell contained it. Over a 1000-unit segment that is
+/// two thousand exact containment tests per segment, and at 10 boxes it was 49% of the entire
+/// query — a *sample* standing in for a proof, at a price nobody would accept if they were told
+/// that is what it was.
+///
+/// A cell of the decomposition is a trapezoid, so its vertical bounds are lines, and "is this
+/// segment inside this cell over this abscissa range" is a pair of half-interval intersections
+/// (see [`segment_within_band`]). Each cell that overlaps a segment's abscissa range contributes an
+/// interval over which the segment is inside it, and the segment is inside the *corridor* when those
+/// intervals cover its range. A coverage gap is the corridor not containing the segment, and it is
+/// detected exactly rather than missed between two samples.
+fn inside_corridor(
+    decomp: &Decomposition,
+    cells: &[crate::decomp::CellId],
+    knots: &[Point2D],
+) -> bool {
+    // The corridor's cells, sorted by their left edge, each with its two bound lines.
+    let mut bounds: Vec<(f64, f64, Line, Line)> = cells
+        .iter()
+        .map(|c| {
+            let cell = decomp.cells()[*c as usize];
+            (
+                cell.bl.x,
+                cell.br.x,
+                (line_of(cell.bl, cell.br)),
+                (line_of(cell.tl, cell.tr)),
+            )
+        })
+        .collect();
+    bounds.sort_by(|a, b| a.0.total_cmp(&b.0));
+
+    for seg in knots.windows(2) {
+        let (a, b) = (seg[0], seg[1]);
+        let (lo, hi) = (a.x.min(b.x), a.x.max(b.x));
+        // Intervals over which the segment is known to be inside the corridor, merged as we go.
+        let mut covered: Vec<(f64, f64)> = Vec::new();
+        for (cell_lo, cell_hi, lower, upper) in &bounds {
+            if *cell_lo > hi {
+                break;
+            }
+            if *cell_hi < lo {
+                continue;
+            }
+            let (u, v) = (lo.max(*cell_lo), hi.min(*cell_hi));
+            if !segment_within_band(a, b, *lower, *upper, u, v) {
+                continue;
+            }
+            match covered.last_mut() {
+                Some(last) if last.1 >= u - EPS => last.1 = last.1.max(v),
+                _ => covered.push((u, v)),
+            }
+        }
+        // Every point of the segment's abscissa range must be covered. A vertical segment is a
+        // single abscissa, which `covered` handles because `u == v` still produces an interval.
+        let mut reach = lo;
+        for (u, v) in &covered {
+            if *u > reach + EPS {
+                return false;
+            }
+            reach = reach.max(*v);
+        }
+        if reach < hi - EPS {
+            return false;
+        }
+    }
+    true
+}
+
+/// A line through `p` and `q`, as `(slope, intercept)`.
+fn line_of(p: Point2D, q: Point2D) -> Line {
+    let dx = q.x - p.x;
+    if dx == 0.0 {
+        return (f64::INFINITY, 0.0);
+    }
+    let slope = (q.y - p.y) / dx;
+    (slope, p.y - slope * p.x)
 }
 
 #[cfg(test)]
