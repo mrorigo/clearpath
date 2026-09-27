@@ -862,65 +862,67 @@ emitted.
 
 Every number here is a measurement from `cargo bench --bench route` on an aarch64 core, release
 build, a 1000x1000 workspace, axis-aligned boxes on a lattice. They are what the code does, not
-what the code should do.
+what the code should do. The run-to-run spread on this machine is significant — the same 10-box case
+has measured between 37 and 72 us in consecutive runs — so treat these as indicative.
 
 ### 8.1 Allocation
 
-**The zero-allocation claim is false, and the spec previously said otherwise.** Measured with a
-counting global allocator (`tests/allocations.rs`):
+A warm query, measured with a counting global allocator (`tests/allocations.rs`):
 
-| Obstacles | Warm query | Cold query |
+| Obstacles | Warm | Cold |
 | --- | --- | --- |
-| 10 | 292 allocations, 22.5 kB | 298 allocations, 23.0 kB |
-| 50 | 703 allocations, 57.3 kB | 710 allocations, 58.5 kB |
+| 10 | 160 allocations, 12.6 kB | 166 allocations, 13.1 kB |
+| 50 | 332 allocations, 32.3 kB | 339 allocations, 33.6 kB |
 
-The retained scratch is real but marginal — six allocations at 10 boxes — because
-[`Decomposition`] is rebuilt on every query: the sweep's cell count depends on the obstacles, and
-nothing fills the previous one in place. That is the single largest known allocation source and the
-obvious target of an optimisation pass. Until it is addressed, this section states the measured
-figures rather than the intention.
+**Still not zero, and the zero-allocation goal is not met.** What remains is roughly one `Vec` per
+stage — the funnel's portal and sign lists, the corridor, the knots, the tangents, the admissible
+sets — plus the decomposition being rebuilt per query. Reaching zero means threading the scratch
+through every stage and rebuilding the decomposition in place, which is the next step rather than
+this one. The `Vec`-of-`Vec` structures that dominated the earlier count are gone (that pass took
+10 boxes from 284 to 160 and halved the bytes).
 
 ### 8.2 Latency
 
-`route_smooth`, end to end:
+`route_smooth`, end to end, after the optimisation pass:
 
 | Obstacles | margin 0 | margin 1 |
 | --- | --- | --- |
-| 10 | **157 us** | 122 us |
-| 50 | **510 us** | 407 us |
-| 200 | **1.65 ms** | 1.49 ms |
+| 10 | **37 us** | 35 us |
+| 50 | **330 us** | 222 us |
+| 200 | **1.33 ms** | 1.07 ms |
 
-`route_orthogonal`: 10 boxes 10.7 us, 50 boxes 104 us.
+`route_orthogonal`: 10 boxes 7.1 us, 50 boxes 92 us.
 
-**The original "< 50 us for 10-50 boxes" target is not met** — by 3x at 10 boxes and 10x at 50. It
-is retained as the goal and the measurement is published so the gap is visible.
+**The original "< 50 us for 10-50 boxes" target is now met at 10 boxes and missed by 7x at 50.** The
+optimisation pass moved it from 157 us and 510 us, a 4.3x and 3.5x improvement.
 
 The margin makes queries *faster*, not slower, which is worth stating because the opposite is
 intuitive: square inflation adds no vertices (unlike an arc approximation), so the sweep sees
 exactly the same event count and only the free-space test changes.
 
-**Where the time actually goes** (10 boxes, margin 0, total 157 us):
+**Where the time goes, and what the optimisation pass found** (10 boxes, margin 0, total 37 us):
 
-| Stage | Time | Share |
+| Stage | Before | After |
 | --- | --- | --- |
-| `decomp` — the sweep | 9.4 us | 6% |
-| `funnel::cell_search` — the A\* | 0.96 us | 0.6% |
-| `funnel::string_pull` | 77 us | 49% |
-| `spline::solver` — the tangent solve | 0.25 us | 0.2% |
-| `spline::containment` — the repair | 31 us | 20% |
-| the rest (clearance construction, glue) | 38 us | 24% |
+| `decomp` — the sweep | 9.4 us | 8.3 us |
+| `funnel::cell_search` — the A\* | 0.96 us | 1.0 us |
+| `funnel::string_pull` | **77 us** | **0.42 us** |
+| `spline::solver` — the tangent solve | 0.25 us | 0.28 us |
+| `spline::containment` — the repair | 31 us | 30 us |
 
-This overturns the assumption the earlier revision of this document carried, that the sweep was the
-cost centre. It is 6%. Three quarters of the query is the two **verification** layers, and both are
-dominated by exact predicates: the funnel's corridor-membership check samples every segment and
-tests each sample against the corridor's cells, and the repair's `hull_is_free` tests every hull
-edge against every obstacle vertex for clearance and for crossings. The geometry being verified is
-cheap; the verification of it is not.
+The funnel's own geometry was never the cost. Its *corridor-membership check* was, because it
+sampled every segment twice per unit of length and asked each sample whether any corridor cell
+contained it: two thousand exact containment tests per 1000-unit segment, 49% of the whole query. A
+**sample standing in for a proof**, at a price nobody would accept if told that is what it was.
+Replacing it with the analytic statement — a cell is a trapezoid, so containment of a segment in a
+cell over an abscissa range is a pair of half-interval intersections, and the segment is inside the
+corridor when those intervals cover its range — is a 180x improvement on that stage and a 4.3x
+improvement end to end.
 
-So the optimisation targets, in order: the corridor-membership check (it is
-`O(segments x samples x cells)` and can be `O(cells in the sample's slab)` by walking the ordered
-corridor), then `hull_is_free` (an early exit and a spatial index over obstacle edges), then the
-per-query decomposition rebuild of section 8.1. Not the sweep.
+The repair is now the largest single stage. It is dominated by exact predicates in
+`Clearance::hull_is_free`, which is `O(hull edges x obstacle edges)` with a square root per test.
+The next targets, in order: a spatial index over obstacle edges so the hull test only considers
+nearby ones, then carrying the scratch through the remaining stages for the allocation goal.
 
 ### 8.3 Benchmarks
 
@@ -928,7 +930,9 @@ per-query decomposition rebuild of section 8.1. Not the sweep.
 
 * `route_smooth` — end to end at 10/50/200 boxes, margin 0 and 1, fresh planner each iteration so
   the corpus is proved routable first.
-* `stage` — decompose, search, funnel, solve and repair separately, at the same sizes.
+* `stage` — decompose, search, funnel, solve and repair separately, at the same sizes. This is the
+  group that found the funnel, and it is the reason it exists: the end-to-end number alone would
+  have sent the optimisation pass to the sweep, which was 6% of the query.
 * `warm` — a planner that has already run, which is the figure section 8.2 names.
 * `route_orthogonal` — the rectilinear router at 10 and 50 boxes.
 * A scalar-versus-SIMD group, deferred until `spline::simd` exists. It is listed here so its

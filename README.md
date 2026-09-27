@@ -77,20 +77,24 @@ Measured on an aarch64 core, release build, 1000×1000 workspace, axis-aligned b
 
 | Obstacles | `route_smooth`, margin 0 | margin 1 |
 | --- | --- | --- |
-| 10 | 157 µs | 122 µs |
-| 50 | 510 µs | 407 µs |
-| 200 | 1.65 ms | 1.49 ms |
+| 10 | 37 µs | 35 µs |
+| 50 | 330 µs | 222 µs |
+| 200 | 1.33 ms | 1.07 ms |
 
-The specification's original target was 50 µs for 10–50 boxes; **it is not met**, and
-`docs/SPEC.md` §8.2 carries the measurements rather than the aspiration.
+The specification's original target was 50 µs for 10–50 boxes. It was missed by 3x at the start of
+the optimisation pass and is now **met at 10 boxes**; 50 boxes is still 7x over.
 
-The stage split is not where the design would suggest. At 10 boxes: the sweep is 9 µs (6%), the
-corridor search 1 µs, the tangent solve 0.25 µs — and the *funnel* 77 µs and the *repair* 31 µs,
-together three quarters of the query. Both are dominated by exact predicates in their verification
-layers, not by the geometry they are verifying. That is where an optimisation pass should start.
+The stage split is not where the design suggests, and that is the most useful thing the benchmarks
+produced. At 10 boxes the sweep is 8 µs of 37 µs. The *funnel* was 77 µs — half the query — and
+none of it was the funnel's geometry: it was the corridor-membership check, which sampled every
+segment twice per unit of length and asked each sample whether any corridor cell contained it. A
+sample standing in for a proof, two thousand exact predicates per long segment. Stating it exactly
+instead — a cell is a trapezoid, so containment is a pair of half-interval intersections — took that
+stage to 0.4 µs, and the query with it from 157 µs to 37 µs.
 
-A warm query makes 292 allocations at 10 boxes and 703 at 50, against 298 and 710 for a cold one:
-the retained scratch is real but marginal, because the decomposition is rebuilt every time.
+A warm query still makes 160 allocations at 10 boxes (332 at 50). That is down from 292 and 657,
+but **the zero-allocation goal of `docs/SPEC.md` §8.1 is not met**: roughly one `Vec` per stage
+remains, plus the decomposition is rebuilt per query.
 
 ## Development
 
