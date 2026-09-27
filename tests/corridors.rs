@@ -6,14 +6,12 @@
 
 mod common;
 use common::{box_poly, p, WORKSPACE};
-use clearpath::geom::clearance::distance_to_ring;
 use clearpath::decomp::sweep::decompose_with_guides;
 use clearpath::funnel::cell_search::{SearchScratch, search};
 use clearpath::funnel::string_pull::string_pull;
 use clearpath::geom::{FreeSpace, Point2D, Polygon};
 use clearpath::corridor::AdmissibleTangents;
 use proptest::prelude::*;
-use clearpath::geom::BoundingBox;
 
 
 

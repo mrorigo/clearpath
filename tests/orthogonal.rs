@@ -5,8 +5,7 @@
 
 mod common;
 use common::{box_poly, p, WORKSPACE};
-use clearpath::geom::clearance::distance_to_ring;
-use clearpath::geom::{BoundingBox, Point2D, Polygon};
+use clearpath::geom::{Point2D, Polygon};
 use clearpath::{Config, PathPlanError, PathPlanner, PortConstraint, Route, RouteKind, RouteRequest};
 use proptest::prelude::*;
 

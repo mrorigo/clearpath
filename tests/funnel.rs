@@ -11,7 +11,7 @@ use clearpath::decomp::sweep::decompose_with_guides;
 use clearpath::decomp::Decomposition;
 use clearpath::funnel::cell_search::{SearchScratch, search};
 use clearpath::funnel::string_pull::string_pull;
-use clearpath::geom::{BoundingBox, FreeSpace, Point2D, Polygon};
+use clearpath::geom::{FreeSpace, Point2D, Polygon};
 use proptest::prelude::*;
 
 
@@ -19,8 +19,6 @@ use proptest::prelude::*;
 /// corner cannot slip between samples unnoticed.
 const DENSITY: f64 = 20.0;
 
-
-/// Minimum distance from `p` to a ring's boundary.
 
 /// The decomposition the router would build: with the endpoints' abscissae forced into the event
 /// set, so each endpoint lands in its own slab and the corridor can be monotone.

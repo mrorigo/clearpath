@@ -4,11 +4,11 @@
 //! any of the decomposition's own reasoning.
 
 mod common;
-use common::{box_poly, p, WORKSPACE};
+use common::{box_poly, WORKSPACE};
 use clearpath::geom::clearance::distance_to_ring;
 use clearpath::decomp::sweep::decompose;
 use clearpath::geom::predicates::{Orientation, orient2d};
-use clearpath::geom::{BoundingBox, FreeSpace, Point2D, Polygon};
+use clearpath::geom::{FreeSpace, Point2D, Polygon};
 use proptest::prelude::*;
 
 
@@ -17,8 +17,6 @@ use proptest::prelude::*;
 /// sample of the open free space and of the open cells.
 const STEPS: usize = 200;
 
-
-/// Minimum distance from `p` to a ring's boundary.
 
 /// The contract, in two halves.
 ///
