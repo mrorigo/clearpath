@@ -298,24 +298,33 @@ fn gap_probes(active: &[Edge], x: f64) -> Vec<(usize, Point2D)> {
 /// Exact for rectilinear obstacles. See [`decompose`] for why, and for the rejection of a
 /// non-rectilinear obstacle under a nonzero `margin`.
 fn apply_margin(space: &FreeSpace, margin: f64) -> Result<(BoundingBox, Vec<Polygon>), PathPlanError> {
-    let workspace = space.workspace.eroded(margin);
-    let mut forbidden: Vec<Polygon> = Vec::with_capacity(space.obstacles.len());
-    for obstacle in &space.obstacles {
-        if margin == 0.0 {
-            forbidden.push(obstacle.clone());
-            continue;
-        }
-        let parts = rectilinear_rectangles(obstacle.vertices()).ok_or(
-            PathPlanError::MarginUnsupportedGeometry { margin },
-        )?;
+    Ok((space.workspace.eroded(margin), forbidden_rectangles(&space.obstacles, margin)?))
+}
+
+/// The forbidden geometry of the inflated domain, as the rectangles that cover it.
+///
+/// Exposed because the rectilinear router (section 7.2) needs the same geometry and must not
+/// re-derive the margin: two implementations of the margin is one more than there should be.
+pub fn forbidden_rectangles(
+    obstacles: &[Polygon],
+    margin: f64,
+) -> Result<Vec<Polygon>, PathPlanError> {
+    if margin == 0.0 {
+        return Ok(obstacles.to_vec());
+    }
+    let mut out: Vec<Polygon> = Vec::with_capacity(obstacles.len());
+    for obstacle in obstacles {
+        let parts = rectilinear_rectangles(obstacle.vertices())
+            .ok_or(PathPlanError::MarginUnsupportedGeometry { margin })?;
         for part in parts {
             let grown = part.outset(margin);
-            forbidden.push(Polygon::new(grown.corners().to_vec()).map_err(|_| {
-                PathPlanError::MarginUnsupportedGeometry { margin }
-            })?);
+            out.push(
+                Polygon::new(grown.corners().to_vec())
+                    .map_err(|_| PathPlanError::MarginUnsupportedGeometry { margin })?,
+            );
         }
     }
-    Ok((workspace, forbidden))
+    Ok(out)
 }
 
 /// Whether `p` is outside every forbidden polygon.

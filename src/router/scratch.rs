@@ -17,6 +17,8 @@ use crate::geom::Point2D;
 pub struct Scratch {
     /// The cell search's arrays: `g_score`, `came_from`, `closed` and the open list.
     pub search: SearchScratch,
+    /// The rectilinear grid search's arrays.
+    pub grid: crate::router::orthogonal::GridScratch,
     /// The corridor's cells.
     pub corridor_cells: Vec<u32>,
     /// The corridor's portals.

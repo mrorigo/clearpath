@@ -68,7 +68,7 @@ nothing else.
 | M4 | `funnel`: A* cell search + Lee–Preparata string pull | funnel path is collision-free and in-corridor |
 | M5 | `corridor`: per-segment convex corridor | corridors are convex, in free space, and overlap at knots |
 | M6 | `spline` + `router::smooth` | §4.1–§4.3 invariants, §9.3 straight-line reduction |
-| M7 | `router::orthogonal` | §9.8 |
+| M7 | `router::orthogonal` | `tests/orthogonal.rs`: axis alignment, endpoints, clearance of every leg, no repeated or zero-length vertices, and the sealed-region and validation cases — over 6 fixtures and 20 random box fields |
 | M8 | `proptest` suite, benches, `no_std` + `unsafe` CI gates | §10 |
 
 M1–M5 are geometry with no public API beyond internal types; M6 is where `route_smooth` first
@@ -823,22 +823,38 @@ or self-intersecting ring is rejected.
 
 ### 7.2 `route_orthogonal`
 
-`route_orthogonal` builds the Hanan grid induced by the x- and y-coordinates of the **offset**
-obstacles' vertices (section 3.3), clipped to the eroded workspace; performs rectilinear A* over
-the grid cells (4-neighbourhood, cost = Manhattan distance) with a free cell iff its centre is
-outside every offset obstacle; and emits the resulting cell path as an axis-aligned polyline.
+The grid is the **Hanan grid**: the axis-aligned lines through every forbidden face, in both
+directions. Rectilinear A* runs over the cells with 4-neighbourhood adjacency and a Manhattan cost,
+where the step cost is the distance actually travelled along the shared grid line.
 
-Guarantees: every emitted point is inside the eroded workspace and outside every offset obstacle;
-consecutive points differ on exactly one axis; `points.first() == start.point` and
-`points.last() == goal.point`; interior collinear points are merged. If no 4-connected grid path
-exists the result is `NoPathFound` — **there is no `u`-shaped fallback**, because any such
-fallback would be a guess about topology and would be wrong whenever the sealed region is not
-rectangular. The grid is the approximation, and its limits are the error.
+**Why testing a cell's centre is exact, not a sample.** The grid lines pass through every obstacle
+face, so no face crosses a cell's *interior*: a cell is wholly inside or wholly outside each
+obstacle. The centre therefore decides the cell. This is the one property that lets the router be
+as small as it is, and it is worth stating because "sample the cell centre" looks like an
+approximation and is not.
 
-**This is a separate algorithm.** It does not use the decomposition, the funnel, the corridors,
-or the spline. It shares only the margin model of section 3.3 and the ingest validation of
-section 6.1. It is not a post-processing of the smooth route.
+**The polyline routes through cell centres, not corners**, and that is a correctness requirement
+rather than a preference. A segment between two adjacent cells' centres lies inside the union of
+those two cells, both of which are free. A segment between *corners* lies along a grid line, which
+runs between the two cells on either side of it — and the search certified only the centres, so
+one of those two cells may be blocked. The first version routed through corners and produced
+segments that crossed obstacles; the property test found it on most seeds.
 
+The endpoints need an L each, because a query point sits anywhere inside its cell. Both legs of
+each L stay within that cell, so they are clear by the same argument. Start and goal in the same
+cell get a single L and no detour through the centre.
+
+`PortConstraint::direction` does not apply here: a rectilinear segment is axis-aligned, so an
+arbitrary requested direction cannot be honoured. That is documented rather than silently
+half-applied.
+
+**No `u`-shaped fallback.** When the grid has no 4-connected path the answer is `NoPathFound`. A
+fallback that guesses at topology is wrong whenever the sealed region is not rectangular, and a
+wrong rectilinear route is a collision.
+
+**The result is verified before it is returned.** Every leg is sampled against
+[`Clearance`](§6.4), so a grid that produced a bad route for any reason is refused rather than
+emitted.
 
 ---
 
@@ -1036,6 +1052,9 @@ product question, one undecided algorithm) and closed them.
 | 48 | `hull_is_free` rejected a hull merely *touching* an obstacle | A taut path's knots lie exactly on obstacle boundaries, so the hull always shares an endpoint with an obstacle edge, and every route was refused | §6.4: proper crossings only, and strictly-inside only for obstacle vertices |
 | 49 | The repair damped all tangents towards zero | A control point poking a positive amount into an obstacle shrinks but never reaches the boundary, so the hull stays obstructed forever and one bad knot flattened the whole route | §6.5: the offending segment is zeroed specifically |
 | 50 | `AdmissibleSet::vertices` intersected only *consecutive* half-planes | The set is two cells' four planes each, not in cyclic order, so most corners were missed and the duplicates that survived made `project` return a point outside the set | §4.6: every pair is tried |
+| 52 | §7.2 said the grid route is emitted as "the resulting cell path" | Undefined, and the natural reading — cell *corners* — is wrong: a segment along a grid line runs between the two cells on either side of it, and the search only certified the centres. The first implementation routed through corners and produced segments crossing obstacles | §7.2: route through cell *centres*, with the one-cell case special-cased |
+| 53 | `upper_bound` returned `Option` via `.ok()` on the `binary_search` result | `.ok()` maps `Ok` and `Err` alike, so it could never distinguish "found" from "past the end"; `Err(0)` — a point below every grid line — was not reported as outside | §7.2: the three cases are distinguished, and a point below the grid has no cell |
+| 54 | `RouteRequest::clearance` was used for the rectilinear check | Already fixed in A.45, but the rectilinear router inherited it, and its verification would have inherited it too | Both routers go through the same `clearance()`, so there is one margin predicate |
 | 51 | `CubicBezierSegment::tangent` | The derivative was written as a difference of basis terms, which does not reduce to `3(P1-P0)` at `t = 0`; the endpoint tangents were wrong | `B'(t) = 3(1-t)^2(P1-P0) + 6(1-t)t(P2-P1) + 3t^2(P3-P2)`, with a test at both ends |
 | 42 | `is_free` used `distance >= 0` | True for every point, including points inside an obstacle | `Clearance::is_free` distinguishes *strictly* inside (`contains` and a positive distance) from *on* the boundary, because at `margin == 0` a taut path's knots lie exactly on boundaries and the guarantee is `>= margin` |
 | 38 | The M4 gate asserted the taut path is in the free space | Wrong assertion: a taut path hugs the obstacles it wraps around, so with `margin == 0` its knots lie exactly on obstacle boundaries. A containment test rejects every useful route | §9.0: a distance-based clearance test (`>= margin`), which is the actual guarantee. L2, the corridor-membership test, stays a containment test because a cell boundary is not an obstacle |
