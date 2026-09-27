@@ -21,6 +21,11 @@ libm = "0.2"
 
 [dev-dependencies]
 proptest = "1.6"
+criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support"] }
+
+[[bench]]
+name = "route"
+harness = false
 
 [lints.rust]
 missing_docs = "warn"

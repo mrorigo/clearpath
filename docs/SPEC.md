@@ -858,33 +858,81 @@ emitted.
 
 ---
 
-## 8. Performance targets
+## 8. Performance
 
-1. **Allocation.** After the first query on a given `PathPlanner` with a given
-   `(workspace, obstacle-count, config)` shape, subsequent queries perform **zero heap
-   allocations** on the success path, verified by a counting global allocator in the test
-   suite. The first query of a shape, and any query whose result needs more capacity than the
-   arena holds, may allocate. The draft's unqualified "zero persistent heap allocations" is
-   otherwise untestable.
-2. **Latency.** Warm query, 10–50 axis-aligned box obstacles, `margin = 1.0`, start/goal
-   forcing 2–4 spline segments: **< 50 microseconds** median on a modern x86_64 or aarch64
-   core, measured by Criterion with `--warm-up-time 1`.
-   *Status: **not met, and the target is not currently achievable.** Measured decomposition-only
-   cost (Stages 1a+1b, the whole of M3) on an aarch64 core, 100x100 workspace, boxes on a lattice:
-   10 boxes 74 us, 50 boxes 227 us, at either `margin` 0 or 1. The margin is now nearly free
-   because square inflation adds no vertices; the cost is the sweep, which is `O(events x edges)`.
-   The end-to-end figure will be worse. The target is retained as the goal and the implementation
-   is expected to need a sweep with an incrementally maintained active-edge list before it can be
-   approached; `tests/scale.rs` prints the current figures so the gap stays visible.
-3. **Benchmarks.**
-   * End-to-end `route_smooth` at N = 10/50/200 boxes.
-   * Stage 1 cost split: `inflate`+`clip` vs. `sweep` vs. cell location.
-   * `string_pull` throughput in portals/`ns` with an operation counter assertion.
-   * `solver` + `containment` (damping repair) throughput.
-   * Scalar vs. `simd` batched evaluation, with a bitwise-equality assertion.
-4. **Out of scope for v1.** Incremental or cached decomposition updates. The draft's "full CDT
-   generation vs incremental updates" benchmark implies an incremental API that does not exist in
-   the API surface. It is deferred; no incremental API is promised.
+Every number here is a measurement from `cargo bench --bench route` on an aarch64 core, release
+build, a 1000x1000 workspace, axis-aligned boxes on a lattice. They are what the code does, not
+what the code should do.
+
+### 8.1 Allocation
+
+**The zero-allocation claim is false, and the spec previously said otherwise.** Measured with a
+counting global allocator (`tests/allocations.rs`):
+
+| Obstacles | Warm query | Cold query |
+| --- | --- | --- |
+| 10 | 292 allocations, 22.5 kB | 298 allocations, 23.0 kB |
+| 50 | 703 allocations, 57.3 kB | 710 allocations, 58.5 kB |
+
+The retained scratch is real but marginal — six allocations at 10 boxes — because
+[`Decomposition`] is rebuilt on every query: the sweep's cell count depends on the obstacles, and
+nothing fills the previous one in place. That is the single largest known allocation source and the
+obvious target of an optimisation pass. Until it is addressed, this section states the measured
+figures rather than the intention.
+
+### 8.2 Latency
+
+`route_smooth`, end to end:
+
+| Obstacles | margin 0 | margin 1 |
+| --- | --- | --- |
+| 10 | **157 us** | 122 us |
+| 50 | **510 us** | 407 us |
+| 200 | **1.65 ms** | 1.49 ms |
+
+`route_orthogonal`: 10 boxes 10.7 us, 50 boxes 104 us.
+
+**The original "< 50 us for 10-50 boxes" target is not met** — by 3x at 10 boxes and 10x at 50. It
+is retained as the goal and the measurement is published so the gap is visible.
+
+The margin makes queries *faster*, not slower, which is worth stating because the opposite is
+intuitive: square inflation adds no vertices (unlike an arc approximation), so the sweep sees
+exactly the same event count and only the free-space test changes.
+
+**Where the time actually goes** (10 boxes, margin 0, total 157 us):
+
+| Stage | Time | Share |
+| --- | --- | --- |
+| `decomp` — the sweep | 9.4 us | 6% |
+| `funnel::cell_search` — the A\* | 0.96 us | 0.6% |
+| `funnel::string_pull` | 77 us | 49% |
+| `spline::solver` — the tangent solve | 0.25 us | 0.2% |
+| `spline::containment` — the repair | 31 us | 20% |
+| the rest (clearance construction, glue) | 38 us | 24% |
+
+This overturns the assumption the earlier revision of this document carried, that the sweep was the
+cost centre. It is 6%. Three quarters of the query is the two **verification** layers, and both are
+dominated by exact predicates: the funnel's corridor-membership check samples every segment and
+tests each sample against the corridor's cells, and the repair's `hull_is_free` tests every hull
+edge against every obstacle vertex for clearance and for crossings. The geometry being verified is
+cheap; the verification of it is not.
+
+So the optimisation targets, in order: the corridor-membership check (it is
+`O(segments x samples x cells)` and can be `O(cells in the sample's slab)` by walking the ordered
+corridor), then `hull_is_free` (an early exit and a spatial index over obstacle edges), then the
+per-query decomposition rebuild of section 8.1. Not the sweep.
+
+### 8.3 Benchmarks
+
+`benches/route.rs`, five groups:
+
+* `route_smooth` — end to end at 10/50/200 boxes, margin 0 and 1, fresh planner each iteration so
+  the corpus is proved routable first.
+* `stage` — decompose, search, funnel, solve and repair separately, at the same sizes.
+* `warm` — a planner that has already run, which is the figure section 8.2 names.
+* `route_orthogonal` — the rectilinear router at 10 and 50 boxes.
+* A scalar-versus-SIMD group, deferred until `spline::simd` exists. It is listed here so its
+  absence is a recorded decision rather than an oversight.
 
 ---
 
@@ -967,19 +1015,36 @@ For a fixed corpus: 200 runs of the same request produce bit-identical output (D
 
 ### 9.8 Orthogonal router
 
-Assert every consecutive point pair in `OrthogonalPolyline::points` differs on exactly one axis,
-all points are inside the eroded workspace and outside every offset obstacle, and
-`points[0] == start.point`, `last == goal.point`.
+Assert every consecutive point pair differs on exactly one axis, that no vertex repeats and no
+segment is zero length, that every point of every leg is in the free space, that
+`points[0] == start.point` and `last == goal.point`, and that a sealed region reports
+`NoPathFound` rather than a route. Over 6 fixtures and 20 random box fields, run six times
+(§10).
 
 
 ---
 
 ## 10. Definition of done
 
-* `cargo build` succeeds with `--no-default-features`, with `std`, and with `simd`.
-* `cargo clippy --all-features -- -D warnings` is clean.
-* `cargo test --all-features` passes; `proptest` runs 256 cases per property in CI.
-* `cargo bench` produces the five benchmark groups in section 8.3.
+`./scripts/ci.sh` is the executable form of this section, and CI runs the same script.
+
+* `cargo build --all-targets` succeeds.
+* `cargo build --no-default-features` succeeds, and a cross-compile to a bare-metal target when one
+  is installed. The crate is `#![no_std]` unconditionally; the feature only drops the `std`
+  dependency.
+* `cargo clippy --all-targets --all-features -- -D warnings` is clean.
+* `unsafe` appears only in `src/spline/simd.rs`, and only under an explicit
+  `#![allow(unsafe_code)]`. Enforced by a grep for `unsafe` in code positions, because
+  `#![deny(unsafe_code)]` cannot express "allowed in exactly one file", and by a grep that would
+  also fire on a doc comment merely naming it.
+* `cargo test --all-features` passes.
+* **The test suite is run six times.** The property tests reseed on every run, and two of the bugs
+  found during development (a topological check standing in for a metric one, and a rectilinear
+  route through cell corners) reproduced on only some seeds. A single green run is not evidence for
+  either.
+* `cargo doc --no-deps` builds; the doc example compiles.
+* `cargo bench --bench route` produces the groups in section 8.3, and CI publishes the figures so
+  a regression is visible rather than discovered later.
 * Every claim in section 4 has a test in section 9 referencing it.
 
 ---

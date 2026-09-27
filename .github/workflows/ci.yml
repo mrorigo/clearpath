@@ -1,0 +1,38 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  gates:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+
+      - name: no_std cross-compile
+        run: |
+          rustup target add thumbv7em-none-eabihf
+          cargo build --no-default-features --target thumbv7em-none-eabihf
+
+      - name: gates
+        run: ./scripts/ci.sh
+
+  benches:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: record the benchmarks
+        # The numbers in docs/SPEC.md section 8.2 are measurements, and a measurement that is
+        # never re-taken is a guess. This publishes the current figures on every change so a
+        # regression is visible in the log rather than discovered later.
+        run: cargo bench --bench route -- --save-baseline reference
+      - uses: actions/upload-artifact@v4
+        with:
+          name: criterion
+          path: target/criterion
