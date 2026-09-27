@@ -176,24 +176,38 @@ Consequences, all intentional:
 is a circular arc of radius `margin` joined by tangent segments. The implementation emits a
 polygonal approximation:
 
-* Arc segment count:
-  `$n = \lceil \theta / (2 \arccos(1 - r)) \rceil`, `$r = \text{ARC\_SAGITTA\_RATIO} = 10^{-3}`,
-  `$theta$` = interior turn angle. Capped at `Config::max_arc_segments` (default 64) per corner.
-* The arcs are approximated with **inscribed chords**, which lie *inside* the true offset curve,
-  so the polygonal offset is up to `margin * r` short of the true offset. To keep the guarantee
-  one-sided, the offset radius used is `margin * (1 + r)`, and the arcs are then inscribed
-  against that radius. The resulting offset region therefore **contains** the true offset
-  region, and a curve inside it is `>= margin` from the original obstacle.
+Let `$R = \text{margin} \cdot (1 + \text{SAGITTA\_RATIO})$ be the radius the offset is actually
+built at, and `$\theta$` the interior turn angle at a convex corner.
 
-  `$r` and the resulting bound are what §9.1's `margin - 1e-9` assertion rests on, so they are
-  constants with tests, not tunables.
-* Reflex corners of the original polygon are *not* offset (the offset boundary turns inward
-  there); they are emitted unchanged. This is the standard `Minkowski` result and it keeps the
-  offset polygon a single ring.
+* Each convex corner emits an arc as `n + 1` samples: both tangent points, and the midpoints of
+  the `n` equal sub-arcs between them. The chords are therefore **inscribed**, and the interior of
+  a chord passes at `$R \cos(\theta / 2n)$` from the corner vertex.
+* Arc segment count:
+  `$n = \lceil \theta / (2 \arccos(1 / (1 + \text{SAGITTA\_RATIO}))) \rceil`, capped at
+  `Config::max_arc_segments` (default 64) per corner. Choosing the step from
+  `$\arccos(1/(1+r))$` rather than `$\arccos(1-r)$` is what makes the interior of every chord
+  satisfy `$R \cos(\text{step}/2) \ge \text{margin}$`. The looser bound clears the arc's
+  *endpoints* but not its middle, and would leak up to `margin * r` of clearance at every corner.
+* `SAGITTA_RATIO = 10^{-2}`, which costs six arc segments for a right angle. The bound above is
+  exact rather than approximate, so this is a free parameter: raising it raises the vertex count
+  of every offset obstacle roughly linearly, and lowering it does not improve the guarantee.
+* Reflex corners are **cut back to the intersection of the two neighbouring offset lines**, which
+  is where the boundary of the `margin`-neighbourhood actually runs. Emitting the reflex corner
+  unchanged, or joining its tangent points with a chord, both put the offset boundary closer to
+  the corner than `margin` and break the guarantee. Collinear corners emit their tangent point.
 * `margin == 0` is an exact identity: no vertices are added or moved.
-* The offset of a degenerate (zero-area) obstacle ring is well defined; such obstacles are
-  rejected at ingest anyway (§6.1), so this only needs to not panic.
+* A convex arc, a straight offset edge, and a cut-back reflex corner all lie at distance exactly
+  `margin` from the original ring, so every point of the offset boundary is a point of the true
+  `margin`-neighbourhood boundary. The M2 gate tests chord *interiors* as well as samples,
+  because the chord interior is the case a sample-only test would miss.
+* An offset ring that self-intersects — which happens when `margin` is large enough to fill a
+  narrow notch in the obstacle — is `InvalidObstacle` with reason `MarginTooLarge`. It is
+  deliberately *not* dropped: a dropped obstacle is a route straight through it.
 * `margin` must be finite and `>= 0`; otherwise `InvalidConfig`.
+* The erosion does not usually *swallow* an obstacle that sits inside the workspace. An obstacle
+  at distance `$d$` from a wall survives the clip iff `$d \ge 2 \cdot \text{margin}$`, so a large
+  margin makes the workspace smaller, not the obstacles. Only an obstacle that does not reach the
+  eroded workspace at all is dropped.
 
 
 ---
@@ -281,10 +295,14 @@ kernels are kept in the scalar path.
 
 ### 4.5 Unsafe code
 
-`#![forbid(unsafe_code)]` at the crate root. The `simd` feature is the single exception: the
-module `spline::simd` declares `#![allow(unsafe_code)]` and contains only `core::arch`
-intrinsics. `geom::predicates` is pure safe Rust (expansion arithmetic on `f64`/`i32` pairs) and
-requires no `unsafe`.
+`#![deny(unsafe_code)]` at the crate root, and `#![allow(unsafe_code)]` inside `spline::simd`
+only. Note this is `deny`, not `forbid`: an inner `allow` **cannot** override an outer `forbid`,
+so the draft's pairing was not compilable. `deny` plus the CI grep (section 9.7) gives the same
+practical guarantee.
+
+`geom::predicates` needs no `unsafe` at all. Its exact product is Dekker split-and-multiply over
+`f64`, not `f64::mul_add`, because `mul_add` is only in `core` when the target has a hardware FMA
+— relying on it would make the predicate silently target-dependent, which section 4.4 forbids.
 
 ### 4.6 Shared-tangent clamping (the multi-cell rule)
 
@@ -767,6 +785,7 @@ pub enum InvalidObstacleReason {
     NaNOrInfinite,      // any coordinate is not finite
     SelfIntersecting,   // a non-adjacent edge pair crosses
     DegenerateArea,     // zero total enclosed area
+    MarginTooLarge,     // the offset ring self-intersects; the margin fills a narrow notch
 }
 ```
 
@@ -962,4 +981,8 @@ product question, one undecided algorithm) and closed them.
 | 27d | **Funnel validity** | The draft's funnel assumed the A* corridor was a valid funnel input without saying so | **§4.7 L2, new**, with an M4 gate that tests it directly rather than relying on the argument |
 | 27e | **Orthogonal `u`-fallback** | My own first draft's fallback would have guessed topology and been wrong for non-rectangular sealed regions | Deleted (§7.2); `NoPathFound` is returned instead |
 | 27f | **`OutsideWorkspace` / `ConstraintEdgesCross` errors** | Both became wrong or unnecessary once `margin` was applied at ingest and Stage 1 stopped needing crossing-free constraints | Removed from the error enum, with the reason stated (§7.1) |
+| 28 | `#![forbid]` at the root plus `#![allow]` in a module | Not compilable: an inner `allow` cannot override an outer `forbid` | §4.5 uses `deny` plus the CI grep gate |
+| 29 | Arc bound `2 arccos(1 - r)` | Guarantees the arc's *endpoints* clear the margin, not the interior of each chord, which passes at `R cos(step/2)` — up to `margin * r` too close at every corner. Found by the M2 chord-interior test | §3.3: `2 arccos(1/(1+r))`, and the ratio raised to `1e-2` now that the bound is exact rather than approximate |
+| 30 | `InvalidObstacleReason` had no variant for "the offset ring self-intersects" | The only options were to drop the obstacle — which is a route through it — or to add a variant | `MarginTooLarge` added (§7.1) |
+| 31 | §3.3 claimed the erosion "swallows" obstacles near a wall | It does not: an obstacle at distance `d` survives iff `d >= 2 * margin` | §3.3 states the actual condition; a regression test pins it |
 
