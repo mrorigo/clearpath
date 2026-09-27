@@ -3,28 +3,15 @@
 //! The contract is narrow on purpose: an axis-aligned polyline from the start to the goal, in the
 //! free space. Everything else — optimality, aesthetics — is not claimed.
 
+mod common;
+use common::{box_poly, p, WORKSPACE};
+use clearpath::geom::clearance::distance_to_ring;
 use clearpath::geom::{BoundingBox, Point2D, Polygon};
 use clearpath::{Config, PathPlanError, PathPlanner, PortConstraint, Route, RouteKind, RouteRequest};
 use proptest::prelude::*;
 
-const WORKSPACE: BoundingBox = BoundingBox {
-    min: Point2D { x: 0.0, y: 0.0 },
-    max: Point2D { x: 100.0, y: 100.0 },
-};
 
-fn p(x: f64, y: f64) -> Point2D {
-    Point2D::new(x, y)
-}
 
-fn box_poly(c: [f64; 4]) -> Polygon {
-    Polygon::new(vec![
-        Point2D::new(c[0], c[1]),
-        Point2D::new(c[2], c[1]),
-        Point2D::new(c[2], c[3]),
-        Point2D::new(c[0], c[3]),
-    ])
-    .unwrap()
-}
 
 fn request(obstacles: Vec<Polygon>, start: Point2D, goal: Point2D, margin: f64) -> RouteRequest {
     let mut req = RouteRequest::new(WORKSPACE, start, goal);

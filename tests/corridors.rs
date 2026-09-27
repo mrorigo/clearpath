@@ -4,6 +4,9 @@
 //! Nothing here trusts the construction: the hull is tested against the obstacles directly, and the
 //! projection is tested to land back inside the set.
 
+mod common;
+use common::{box_poly, p, WORKSPACE};
+use clearpath::geom::clearance::distance_to_ring;
 use clearpath::decomp::sweep::decompose_with_guides;
 use clearpath::funnel::cell_search::{SearchScratch, search};
 use clearpath::funnel::string_pull::string_pull;
@@ -12,24 +15,8 @@ use clearpath::corridor::AdmissibleTangents;
 use proptest::prelude::*;
 use clearpath::geom::BoundingBox;
 
-const WORKSPACE: BoundingBox = BoundingBox {
-    min: Point2D { x: 0.0, y: 0.0 },
-    max: Point2D { x: 100.0, y: 100.0 },
-};
 
-fn box_poly(c: [f64; 4]) -> Polygon {
-    Polygon::new(vec![
-        Point2D::new(c[0], c[1]),
-        Point2D::new(c[2], c[1]),
-        Point2D::new(c[2], c[3]),
-        Point2D::new(c[0], c[3]),
-    ])
-    .unwrap()
-}
 
-fn p(x: f64, y: f64) -> Point2D {
-    Point2D::new(x, y)
-}
 
 /// A tangent is admissible when it is a fraction of the chord: the chord direction is what the
 /// solver would produce before any constraint, and scaling it is a one-parameter family that

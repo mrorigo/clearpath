@@ -3,44 +3,22 @@
 //! Checked on a dense grid against a direct free-space predicate, so the gate does not depend on
 //! any of the decomposition's own reasoning.
 
+mod common;
+use common::{box_poly, p, WORKSPACE};
+use clearpath::geom::clearance::distance_to_ring;
 use clearpath::decomp::sweep::decompose;
 use clearpath::geom::predicates::{Orientation, orient2d};
 use clearpath::geom::{BoundingBox, FreeSpace, Point2D, Polygon};
 use proptest::prelude::*;
 
-const WORKSPACE: BoundingBox = BoundingBox {
-    min: Point2D { x: 0.0, y: 0.0 },
-    max: Point2D { x: 100.0, y: 100.0 },
-};
 
 /// Grid resolution. Every cell boundary is on an event line or on an obstacle edge, and the
 /// fixtures put those on round coordinates, so a grid that avoids them entirely is a sound
 /// sample of the open free space and of the open cells.
 const STEPS: usize = 200;
 
-fn box_poly(coords: [f64; 4]) -> Polygon {
-    Polygon::new(vec![
-        Point2D::new(coords[0], coords[1]),
-        Point2D::new(coords[2], coords[1]),
-        Point2D::new(coords[2], coords[3]),
-        Point2D::new(coords[0], coords[3]),
-    ])
-    .unwrap()
-}
 
 /// Minimum distance from `p` to a ring's boundary.
-fn dist_to_ring(p: Point2D, ring: &[Point2D]) -> f64 {
-    let mut best = f64::INFINITY;
-    for i in 0..ring.len() {
-        let a = ring[i];
-        let b = ring[(i + 1) % ring.len()];
-        let ab = b - a;
-        let len2 = ab.norm_squared();
-        let t = if len2 == 0.0 { 0.0 } else { ((p - a).dot(ab) / len2).clamp(0.0, 1.0) };
-        best = best.min(p.distance(a + ab * t));
-    }
-    best
-}
 
 /// The contract, in two halves.
 ///
@@ -76,7 +54,7 @@ fn check_partition(obstacles: Vec<Polygon>, margin: f64) {
                 for f in [0.0f64, 0.25, 0.5, 0.75] {
                     let p = c[i].lerp(c[(i + 1) % 4], f);
                     for obstacle in &obstacles {
-                        let clear = dist_to_ring(p, obstacle.vertices());
+                        let clear = distance_to_ring(p, obstacle.vertices());
                         assert!(
                             clear >= margin - 1e-9,
                             "cell point {p:?} is only {clear} from an obstacle, margin {margin}"
@@ -178,7 +156,7 @@ fn square_inflation_is_conservative_only_at_corners() {
             for f in [0.0f64, 0.25, 0.5, 0.75] {
                 let p = c[i].lerp(c[(i + 1) % 4], f);
                 assert!(
-                    dist_to_ring(p, obstacle.vertices()) >= margin - 1e-9,
+                    distance_to_ring(p, obstacle.vertices()) >= margin - 1e-9,
                     "cell point {p:?} is closer than the margin to the obstacle"
                 );
             }
