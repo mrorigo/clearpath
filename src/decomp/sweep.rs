@@ -2,7 +2,7 @@
 
 use alloc::vec::Vec;
 
-use super::cell::{Cell, CellBuilder, CellId, Portal, PortalId, SideIndex};
+use super::cell::{Cell, CellBuilder, CellId, Portal, SideIndex};
 use super::Decomposition;
 use crate::error::PathPlanError;
 use crate::geom::point::Point2D;
@@ -117,37 +117,58 @@ fn build(
     }
 
 
-    // Probe points and the active edge list for each slab.
-    let mut probes: Vec<Vec<(usize, Point2D)>> = Vec::with_capacity(xs.len() - 1);
-    let mut active: Vec<Vec<Edge>> = Vec::with_capacity(xs.len() - 1);
+    // The active edge list and the probe points for each slab, as flat runs in one buffer each
+    // rather than a `Vec` per slab. A `Vec` of `Vec`s is one allocation per slab per list, and a
+    // decomposition has one slab per distinct event abscissa — on a two-hundred-box route that was
+    // several hundred allocations before anything else happened.
+    let mut active_flat: Vec<Edge> = Vec::new();
+    let mut active_offsets: Vec<u32> = Vec::with_capacity(xs.len());
+    let mut probes: Vec<(usize, Point2D)> = Vec::new();
+    let mut probe_offsets: Vec<u32> = Vec::with_capacity(xs.len());
     for k in 0..xs.len() - 1 {
         let (lo, hi) = (xs[k], xs[k + 1]);
         let mid = 0.5 * (lo + hi);
-        let mut list: Vec<Edge> =
-            edges.iter().copied().filter(|e| e.covers(lo, hi)).collect();
-        sort_by_y_at(&mut list, mid);
-        probes.push(gap_probes(&list, mid));
-        active.push(list);
+        let start = active_flat.len();
+        active_flat.extend(edges.iter().copied().filter(|e| e.covers(lo, hi)));
+        sort_by_y_at(&mut active_flat[start..], mid);
+        active_offsets.push(active_flat.len() as u32);
+        let pstart = probes.len();
+        gap_probes_into(&active_flat[start..], mid, &mut probes);
+        probe_offsets.push(probes.len() as u32);
+        debug_assert!(pstart <= probes.len());
     }
+    // Run `k` of a flat buffer, where `offsets` holds one end offset per run and run 0 starts at 0.
+    let run_of = |offsets: &[u32], k: usize| {
+        let a = if k == 0 { 0 } else { offsets[k - 1] as usize };
+        let b = if k < offsets.len() { offsets[k] as usize } else { usize::MAX };
+        (a, b)
+    };
 
-    // Cells, per slab.
+    // Cells, grouped by slab in one flat buffer with an index of where each slab's run starts.
+    // Same reason as the working lists: a `Vec` per slab was one allocation per slab.
     let mut builder = CellBuilder::default();
-    let mut slab_cells: Vec<Vec<CellId>> = Vec::with_capacity(xs.len() - 1);
+    let mut slab_cells: Vec<CellId> = Vec::new();
+    let mut slab_cell_offsets: Vec<u32> = Vec::with_capacity(xs.len());
     for k in 0..xs.len() - 1 {
-        let mut ids: Vec<CellId> = Vec::with_capacity(probes[k].len());
-        for (gap, probe) in &probes[k] {
+        let (pa, pb) = run_of(&probe_offsets, k);
+        let (aa, ab) = run_of(&active_offsets, k);
+        let slab_probes = &probes[pa..pb];
+        let slab_edges = &active_flat[aa..ab];
+        for (gap, probe) in slab_probes {
             if is_free(&forbidden, *probe) && workspace.contains(*probe) {
-                ids.push(builder.push_cell(cell_from_gap(&active[k], *gap, xs[k], xs[k + 1])));
+                let cell = cell_from_gap(slab_edges, *gap, xs[k], xs[k + 1]);
+                slab_cells.push(builder.push_cell(cell));
             }
         }
-        slab_cells.push(ids);
+        slab_cell_offsets.push(slab_cells.len() as u32);
     }
 
     // Portals: at every event line, join the cells of the two adjacent slabs over their vertical
     // overlap. Both lists are sorted and disjoint in y, so this is a linear merge.
-    for k in 1..xs.len() - 1 {
-        let x = xs[k];
-        connect_slabs(&mut builder, &slab_cells[k - 1], &slab_cells[k], x, true);
+    for (k, x) in xs.iter().enumerate().take(xs.len() - 1).skip(1) {
+        let (la, lb) = run_of(&slab_cell_offsets, k - 1);
+        let (ra, rb) = run_of(&slab_cell_offsets, k);
+        connect_slabs(&mut builder, &slab_cells[la..lb], &slab_cells[ra..rb], *x);
     }
 
     let cells = builder.cells;
@@ -163,20 +184,14 @@ fn build(
         }
     }
 
-    // Compressed adjacency. A cell's side can overlap several cells on the other side, so both
-    // sides are lists, not single portals.
+    // Compressed adjacency, built by two counting passes. A cell's side can overlap several cells on
+    // the other side, so both sides are lists rather than single portals; and a `Vec<Vec<_>>` here
+    // was one allocation per cell.
     let n = cells.len();
-    let mut per_cell_right: Vec<Vec<PortalId>> = alloc::vec![Vec::new(); n];
-    let mut per_cell_left: Vec<Vec<PortalId>> = alloc::vec![Vec::new(); n];
-    for (new_id, portal) in portals.iter().enumerate() {
-        let new_id = new_id as PortalId;
-        per_cell_right[portal.left as usize].push(new_id);
-        per_cell_left[portal.right as usize].push(new_id);
-    }
-    let right_index = SideIndex::build(n, |c| &per_cell_right[c as usize]);
-    let left_index = SideIndex::build(n, |c| &per_cell_left[c as usize]);
+    let right_index = SideIndex::from_portals(n, &portals, true);
+    let left_index = SideIndex::from_portals(n, &portals, false);
 
-    Ok(Decomposition { xs, slab_cells, cells, portals, right_index, left_index })
+    Ok(Decomposition { xs, slab_cells, slab_cell_offsets, cells, portals, right_index, left_index })
 }
 
 /// Every edge of every offset obstacle, plus the four workspace walls.
@@ -275,9 +290,8 @@ fn sort_by_y_at(edges: &mut [Edge], x: f64) {
 /// outside the workspace and the above-gap probe is outside its top wall; both are classified by
 /// the same free-space test and rejected. Carrying the gap index avoids recovering it by
 /// re-scanning the active list, which cannot then disagree with the list it was built from.
-fn gap_probes(active: &[Edge], x: f64) -> Vec<(usize, Point2D)> {
+fn gap_probes_into(active: &[Edge], x: f64, out: &mut Vec<(usize, Point2D)>) {
     let n = active.len();
-    let mut out = Vec::with_capacity(n + 1);
     for i in 0..=n {
         let below = i.checked_sub(1).map_or(f64::NEG_INFINITY, |j| active[j].y_at(x));
         let above = active.get(i).map_or(f64::INFINITY, |e| e.y_at(x));
@@ -290,7 +304,6 @@ fn gap_probes(active: &[Edge], x: f64) -> Vec<(usize, Point2D)> {
         };
         out.push((i, Point2D::new(x, y)));
     }
-    out
 }
 
 /// The workspace eroded by `margin` and the forbidden geometry inset by `margin`.
@@ -353,20 +366,14 @@ fn cell_from_gap(active: &[Edge], i: usize, lo_x: f64, hi_x: f64) -> Cell {
 /// One cell's side can overlap several on the other side, so this is a merge that can emit several
 /// portals for the same cell; the adjacency is built from the portal list afterwards, so nothing is
 /// recorded per cell here.
-fn connect_slabs(
-    builder: &mut CellBuilder,
-    left: &[CellId],
-    right: &[CellId],
-    x: f64,
-    attach_right: bool,
-) {
+fn connect_slabs(builder: &mut CellBuilder, left: &[CellId], right: &[CellId], x: f64) {
     let (mut i, mut j) = (0usize, 0usize);
     while i < left.len() && j < right.len() {
         let l = builder.cells[left[i] as usize].y_range_at(x);
         let r = builder.cells[right[j] as usize].y_range_at(x);
         let lo = l.0.max(r.0);
         let hi = l.1.min(r.1);
-        if hi > lo && attach_right {
+        if hi > lo {
             builder.push_portal(Portal { x, lo, hi, left: left[i], right: right[j] });
         }
         // Advance whichever cell ends first; equal ends advance both.

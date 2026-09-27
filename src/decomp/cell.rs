@@ -184,14 +184,28 @@ pub(crate) struct SideIndex {
 
 impl SideIndex {
     /// Builds the index from, for each cell id, the portals on that side.
-    pub(crate) fn build<'a>(cell_count: usize, per_cell: impl Fn(CellId) -> &'a [PortalId]) -> Self {
-        let mut offsets = Vec::with_capacity(cell_count + 1);
-        let mut ids: Vec<PortalId> = Vec::new();
-        for cell in 0..cell_count {
-            offsets.push(ids.len() as u32);
-            ids.extend_from_slice(per_cell(cell as CellId));
+    /// Builds the index straight from the portal list, by two counting passes.
+    ///
+    /// `right` selects which side of each portal contributes. Taking the portals directly rather
+    /// than a per-cell list of them is what keeps this allocation-free: a `Vec<Vec<_>>` indexed by
+    /// cell was one allocation per cell, and a cell's side can overlap several cells, so the
+    /// "per-cell list" is not a single value anyway.
+    pub(crate) fn from_portals(cell_count: usize, portals: &[Portal], right: bool) -> Self {
+        let mut offsets = alloc::vec![0u32; cell_count + 1];
+        for p in portals {
+            let owner = if right { p.left as usize } else { p.right as usize };
+            offsets[owner + 1] += 1;
         }
-        offsets.push(ids.len() as u32);
+        for i in 1..offsets.len() {
+            offsets[i] += offsets[i - 1];
+        }
+        let mut ids = alloc::vec![0 as PortalId; portals.len()];
+        let mut cursor: Vec<u32> = offsets[..cell_count].to_vec();
+        for (new_id, p) in portals.iter().enumerate() {
+            let owner = if right { p.left as usize } else { p.right as usize };
+            ids[cursor[owner] as usize] = new_id as PortalId;
+            cursor[owner] += 1;
+        }
         Self { offsets, ids }
     }
 
@@ -282,18 +296,29 @@ mod tests {
     }
 
     #[test]
-    fn side_index_slices_per_cell() {
-        let owned: Vec<Vec<PortalId>> = vec![vec![3, 1], vec![], vec![7], vec![0, 5, 9]];
-        let index = SideIndex::build(owned.len(), |c| &owned[c as usize]);
-        assert_eq!(index.len(), 4);
-        for (c, expected) in owned.iter().enumerate() {
-            assert_eq!(index.get(c as CellId), expected.as_slice(), "cell {c}");
-        }
+    fn the_side_index_groups_portals_by_cell() {
+        // Portal 0 joins cells 1 -> 2, portal 1 joins 2 -> 0, portal 2 joins 0 -> 1.
+        let portals = vec![
+            Portal { x: 0.0, lo: 0.0, hi: 1.0, left: 1, right: 2 },
+            Portal { x: 1.0, lo: 0.0, hi: 1.0, left: 2, right: 0 },
+            Portal { x: 2.0, lo: 0.0, hi: 1.0, left: 0, right: 1 },
+        ];
+        // The right-side index is keyed on each portal's `left` cell, the left-side index on its
+        // `right` cell.
+        let right = SideIndex::from_portals(3, &portals, true);
+        assert_eq!(right.len(), 3);
+        assert_eq!(right.get(0), &[2]);
+        assert_eq!(right.get(1), &[0]);
+        assert_eq!(right.get(2), &[1]);
+        let left = SideIndex::from_portals(3, &portals, false);
+        assert_eq!(left.get(0), &[1]);
+        assert_eq!(left.get(1), &[2]);
+        assert_eq!(left.get(2), &[0]);
     }
 
     #[test]
-    fn side_index_of_nothing_is_empty() {
-        let index = SideIndex::build(0, |_| &[]);
+    fn the_side_index_of_nothing_is_empty() {
+        let index = SideIndex::from_portals(0, &[], true);
         assert_eq!(index.len(), 0);
     }
 

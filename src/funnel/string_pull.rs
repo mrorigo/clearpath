@@ -340,10 +340,11 @@ mod tests {
         let d = Decomposition {
             xs: vec![9.0, 15.0, 17.0, 23.0, 25.0, 31.0],
             slab_cells: Vec::new(),
+            slab_cell_offsets: Vec::new(),
             cells,
             portals,
-            right_index: crate::decomp::cell::SideIndex::build(5, |_| &[]),
-            left_index: crate::decomp::cell::SideIndex::build(5, |_| &[]),
+            right_index: crate::decomp::cell::SideIndex::from_portals(5, &[], true),
+            left_index: crate::decomp::cell::SideIndex::from_portals(5, &[], false),
         };
         let corridor = Corridor {
             cells: vec![0, 1, 2, 3, 4],

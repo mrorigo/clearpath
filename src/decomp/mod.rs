@@ -23,9 +23,11 @@ pub use cell::{Cell, CellId, Portal, PortalId};
 pub struct Decomposition {
     /// Sorted, distinct event x coordinates. There are `xs.len() - 1` slabs.
     pub(crate) xs: Vec<f64>,
-    /// Cells grouped by slab; `slab_cells[k]` holds the ids of the cells in slab `k`, ordered
-    /// bottom to top.
-    pub(crate) slab_cells: Vec<Vec<CellId>>,
+    /// Cells grouped by slab in one flat buffer, ordered bottom to top within a slab.
+    pub(crate) slab_cells: Vec<CellId>,
+    /// Where each slab's run in `slab_cells` ends; slab `k` is `[offsets[k-1], offsets[k])`, and
+    /// `offsets` has one more entry than there are slabs.
+    pub(crate) slab_cell_offsets: Vec<u32>,
     pub(crate) cells: Vec<Cell>,
     pub(crate) portals: Vec<Portal>,
     /// Portals to the right of each cell, as a compressed list.
@@ -57,6 +59,20 @@ impl Decomposition {
     #[inline]
     pub fn portal_count(&self) -> usize {
         self.portals.len()
+    }
+
+    /// The ids of the cells in slab `k`, as a range into [`Decomposition::slab_cells`].
+    ///
+    /// Flat rather than a `Vec` per slab: a decomposition has one slab per distinct event
+    /// abscissa, so the nested form was one allocation per slab on every query.
+    pub fn slab_run(&self, k: usize) -> (usize, usize) {
+        let lo = if k == 0 { 0 } else { self.slab_cell_offsets[k - 1] as usize };
+        let hi = if k < self.slab_cell_offsets.len() {
+            self.slab_cell_offsets[k] as usize
+        } else {
+            self.slab_cells.len()
+        };
+        (lo, hi)
     }
 
     /// The portals on the right side of `cell`.
@@ -98,7 +114,8 @@ impl Decomposition {
     pub fn locate(&self, p: Point2D) -> Option<CellId> {
         if !self.xs.is_empty() {
             let k = slab_index(&self.xs, p.x)?;
-            for &id in &self.slab_cells[k] {
+            let (lo, hi) = self.slab_run(k);
+            for &id in &self.slab_cells[lo..hi] {
                 let cell = &self.cells[id as usize];
                 let (lo, hi) = cell.y_range_at(p.x);
                 if p.y >= lo && p.y <= hi && cell.contains(p) {
