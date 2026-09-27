@@ -15,19 +15,22 @@ use super::predicates::{Orientation, orient2d};
 ///
 /// `margin` is the same value passed to the decomposition, so this tests the domain the planner
 /// actually routed in rather than a separately-maintained copy of the rules.
-#[derive(Clone, Debug)]
-pub struct Clearance {
-    obstacles: Vec<Polygon>,
+#[derive(Clone, Copy, Debug)]
+pub struct Clearance<'a> {
+    /// Borrowed, not owned. Cloning the obstacles here cost one allocation per obstacle on every
+    /// query — two hundred of them on a two-hundred-box route, for a value the caller already
+    /// holds and never mutates.
+    obstacles: &'a [Polygon],
     /// The eroded workspace: a point must be inside this.
     workspace: BoundingBox,
     /// The margin, which the obstacles are held off by.
     margin: f64,
 }
 
-impl Clearance {
+impl<'a> Clearance<'a> {
     /// Builds the predicate for the domain the planner used.
-    pub fn new(obstacles: &[Polygon], workspace: BoundingBox, margin: f64) -> Self {
-        Self { obstacles: obstacles.to_vec(), workspace: workspace.eroded(margin), margin }
+    pub fn new(obstacles: &'a [Polygon], workspace: BoundingBox, margin: f64) -> Self {
+        Self { obstacles, workspace: workspace.eroded(margin), margin }
     }
 
     /// The eroded workspace.
@@ -37,7 +40,7 @@ impl Clearance {
 
     /// The obstacles, as the planner saw them.
     pub fn obstacles(&self) -> &[Polygon] {
-        &self.obstacles
+        self.obstacles
     }
 
     /// Whether `p` is in the free space.
@@ -63,15 +66,28 @@ impl Clearance {
         // workspace alone would leave them un-grown. A small relative slack absorbs the rounding in
         // `distance_to_ring` at exactly `margin`.
         let slack = 1e-9 * self.margin.abs().max(1.0);
-        self.obstacles.iter().all(|o| {
-            let ring = o.vertices();
-            let d = distance_to_ring(p, ring);
+        for o in self.obstacles {
+            // A point further than `margin` from an obstacle's bounding box is further than
+            // `margin` from the obstacle, so the per-edge loop below can be skipped. On a route
+            // with many boxes most obstacles are nowhere near any given hull, and this is four
+            // comparisons against a per-edge loop of a square root each.
+            let b = o.bounds();
+            if p.x < b.min.x - self.margin - slack
+                || p.x > b.max.x + self.margin + slack
+                || p.y < b.min.y - self.margin - slack
+                || p.y > b.max.y + self.margin + slack
+            {
+                continue;
+            }
+            let d = distance_to_ring(p, o.vertices());
             // `Polygon::contains` reports the boundary as inside, and at `margin == 0` a taut path's
             // knots lie exactly on boundaries. So the interior test has to be "strictly inside",
             // which is `contains` *and* a positive distance.
-            let strictly_inside = o.contains(p) && d > 0.0;
-            !strictly_inside && d >= self.margin - slack
-        })
+            if (o.contains(p) && d > 0.0) || d < self.margin - slack {
+                return false;
+            }
+        }
+        true
     }
 
     /// Whether the convex hull of `points` is in the free space.
@@ -89,7 +105,7 @@ impl Clearance {
         if hull.len() < 2 {
             return true;
         }
-        for obstacle in &self.obstacles {
+        for obstacle in self.obstacles {
             let ring = obstacle.vertices();
             for k in 0..hull.len() {
                 // The hull's closing polyline, which for a two-point hull is the segment itself.
@@ -214,17 +230,14 @@ mod tests {
         .unwrap()
     }
 
-    fn domain(margin: f64) -> Clearance {
-        Clearance::new(
-            &[square()],
-            BoundingBox::new(Point2D::ZERO, Point2D::new(100.0, 100.0)),
-            margin,
-        )
+    fn domain(obstacles: &[Polygon], margin: f64) -> Clearance<'_> {
+        Clearance::new(obstacles, BoundingBox::new(Point2D::ZERO, Point2D::new(100.0, 100.0)), margin)
     }
 
     #[test]
     fn free_and_blocked_points() {
-        let c = domain(0.0);
+        let obstacles = [square()];
+        let c = domain(&obstacles, 0.0);
         assert!(c.is_free(Point2D::new(10.0, 10.0)));
         assert!(!c.is_free(Point2D::new(50.0, 50.0)));
         // A knot on the boundary is in the free space at margin 0.
@@ -233,7 +246,8 @@ mod tests {
 
     #[test]
     fn the_margin_moves_the_workspace_bound() {
-        let c = domain(10.0);
+        let obstacles = [square()];
+        let c = domain(&obstacles, 10.0);
         assert!(!c.is_free(Point2D::new(5.0, 50.0)));
         assert!(c.is_free(Point2D::new(15.0, 50.0)));
     }
@@ -242,7 +256,8 @@ mod tests {
     fn a_hull_that_clips_a_corner_is_rejected() {
         // The case a midpoint sample misses: a triangle whose only contact with the square is a
         // sliver of one edge's interior, with both endpoints clear.
-        let c = domain(0.0);
+        let obstacles = [square()];
+        let c = domain(&obstacles, 0.0);
         let clipping = vec![
             Point2D::new(38.0, 20.0),
             Point2D::new(38.0, 80.0),
@@ -253,7 +268,8 @@ mod tests {
 
     #[test]
     fn a_clear_hull_is_accepted() {
-        let c = domain(0.0);
+        let obstacles = [square()];
+        let c = domain(&obstacles, 0.0);
         let clear = vec![
             Point2D::new(5.0, 20.0),
             Point2D::new(20.0, 20.0),
@@ -266,7 +282,8 @@ mod tests {
     #[test]
     fn a_hull_containing_an_obstacle_vertex_is_rejected() {
         // The whole obstacle inside the hull, so no edge crosses it.
-        let c = domain(0.0);
+        let obstacles = [square()];
+        let c = domain(&obstacles, 0.0);
         let surrounding = vec![
             Point2D::new(10.0, 10.0),
             Point2D::new(90.0, 10.0),

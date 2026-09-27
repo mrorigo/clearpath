@@ -11,9 +11,7 @@
 //!   segment the straight chord between its knots, which is inside the free space because the taut
 //!   path is (L2). So the worst case is a piecewise-linear route, not a collision or an error.
 
-use alloc::vec::Vec;
 
-use super::CubicBezierSegment;
 use crate::corridor::AdmissibleTangents;
 use crate::geom::clearance::Clearance;
 use crate::geom::point::Point2D;
@@ -44,9 +42,8 @@ pub fn clamp_and_repair(
     max_iters: u32,
     dampening: f64,
 ) -> bool {
-    let _ = dampening;
     project_all(admissible, tangents);
-    if admissible.control_points(knots, tangents, clearance).is_ok() {
+    if admissible.first_obstructed(knots, tangents, clearance).is_none() {
         return true;
     }
     // Damp once: for an overshoot of a few percent this is enough and it keeps the shape.
@@ -54,12 +51,14 @@ pub fn clamp_and_repair(
         *t = *t * dampening;
     }
     project_all(admissible, tangents);
-    if admissible.control_points(knots, tangents, clearance).is_ok() {
+    if admissible.first_obstructed(knots, tangents, clearance).is_none() {
         return true;
     }
     for _ in 0..max_iters {
-        // Find the first obstructed segment and flatten exactly that one.
-        let Some(bad) = obstructed_segment(knots, tangents, clearance) else {
+        // Find the first obstructed segment and flatten exactly that one. Stopping at the first
+        // rather than testing the whole spline is what keeps the repair proportional to the number
+        // of *broken* segments rather than to the length of the route.
+        let Some(bad) = admissible.first_obstructed(knots, tangents, clearance) else {
             return true;
         };
         tangents[bad] = Point2D::ZERO;
@@ -69,27 +68,7 @@ pub fn clamp_and_repair(
     for t in tangents.iter_mut() {
         *t = Point2D::ZERO;
     }
-    admissible.control_points(knots, tangents, clearance).is_ok()
-}
-
-/// The index of the first segment whose control hull is not in the free space.
-fn obstructed_segment(
-    knots: &[Point2D],
-    tangents: &[Point2D],
-    clearance: &Clearance,
-) -> Option<usize> {
-    for i in 0..knots.len().saturating_sub(1) {
-        let hull = [
-            knots[i],
-            knots[i] + tangents[i] / 3.0,
-            knots[i + 1] - tangents[i + 1] / 3.0,
-            knots[i + 1],
-        ];
-        if !clearance.hull_is_free(&hull) {
-            return Some(i);
-        }
-    }
-    None
+    admissible.first_obstructed(knots, tangents, clearance).is_none()
 }
 
 /// Clamps every tangent into its knot's admissible set.
@@ -101,14 +80,3 @@ pub fn project_all(admissible: &AdmissibleTangents, tangents: &mut [Point2D]) {
     }
 }
 
-/// Builds the segments for a taut path under the given tangents, without checking them.
-pub fn segments_for(knots: &[Point2D], tangents: &[Point2D]) -> Vec<CubicBezierSegment> {
-    (0..knots.len().saturating_sub(1))
-        .map(|i| CubicBezierSegment {
-            p0: knots[i],
-            p1: knots[i] + tangents[i] / 3.0,
-            p2: knots[i + 1] - tangents[i + 1] / 3.0,
-            p3: knots[i + 1],
-        })
-        .collect()
-}

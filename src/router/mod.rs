@@ -132,7 +132,7 @@ impl RouteRequest {
     /// here as well shrank the workspace by twice the margin, which is not a safety problem — the
     /// obstacle test is what carries the margin — but it rejects routes that do fit, by reporting
     /// endpoints as outside the workspace.
-    pub fn clearance(&self) -> Clearance {
+    pub fn clearance(&self) -> Clearance<'_> {
         Clearance::new(&self.obstacles, self.workspace, self.config.margin)
     }
 

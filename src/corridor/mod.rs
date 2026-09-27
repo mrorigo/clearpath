@@ -196,6 +196,21 @@ pub fn closest_point_on_segment(p: Point2D, a: Point2D, b: Point2D) -> Point2D {
     a + ab * (((p - a).dot(ab) / len2).clamp(0.0, 1.0))
 }
 
+/// The Bezier segments for a taut path under the given tangents, without checking anything.
+///
+/// The caller is [`AdmissibleTangents::control_points`], or the repair, which has already
+/// established that the tangents are admissible and the hulls clear.
+pub fn segments_for(knots: &[Point2D], tangents: &[Point2D]) -> Vec<CubicBezierSegment> {
+    (0..knots.len().saturating_sub(1))
+        .map(|i| CubicBezierSegment {
+            p0: knots[i],
+            p1: knots[i] + tangents[i] / 3.0,
+            p2: knots[i + 1] - tangents[i + 1] / 3.0,
+            p3: knots[i + 1],
+        })
+        .collect()
+}
+
 /// The admissible tangent set at every knot of a taut path.
 #[derive(Clone, Debug, Default)]
 pub struct AdmissibleTangents {
@@ -263,44 +278,48 @@ impl AdmissibleTangents {
         tangents: &[Point2D],
         clearance: &Clearance,
     ) -> Result<Vec<CubicBezierSegment>, PathPlanError> {
-        let free = |p: Point2D| clearance.is_free(p);
-        if knots.len() < 2 || tangents.len() != knots.len() {
+        if self.first_obstructed(knots, tangents, clearance).is_some() {
             return Err(PathPlanError::NoPathFound);
         }
+        Ok(segments_for(knots, tangents))
+    }
+
+    /// The index of the first segment that is not admissible or not clear, or `None`.
+    ///
+    /// The repair asks this question once per iteration, and the router asks it again at the end,
+    /// so it stops at the first bad segment rather than checking the whole spline. Checking all of
+    /// them and reporting "somewhere" was most of the repair's cost: each full pass re-ran the hull
+    /// test on the segments that were already fine.
+    pub fn first_obstructed(
+        &self,
+        knots: &[Point2D],
+        tangents: &[Point2D],
+        clearance: &Clearance,
+    ) -> Option<usize> {
+        if knots.len() < 2 || tangents.len() != knots.len() {
+            return Some(0);
+        }
         for (i, t) in tangents.iter().enumerate() {
-            let set = self.sets.get(i).ok_or(PathPlanError::NoPathFound)?;
-            if !set.contains(*t) {
-                return Err(PathPlanError::NoPathFound);
+            match self.sets.get(i) {
+                Some(set) if set.contains(*t) => {}
+                _ => return Some(i.min(knots.len() - 2)),
             }
         }
-        let mut out = Vec::with_capacity(knots.len() - 1);
         for i in 0..knots.len() - 1 {
-            let segment = CubicBezierSegment {
-                p0: knots[i],
-                p1: knots[i] + tangents[i] / 3.0,
-                p2: knots[i + 1] - tangents[i + 1] / 3.0,
-                p3: knots[i + 1],
-            };
-            for p in [segment.p0, segment.p1, segment.p2, segment.p3] {
-                if !free(p) {
-                    return Err(PathPlanError::NoPathFound);
-                }
-            }
+            let hull = [
+                knots[i],
+                knots[i] + tangents[i] / 3.0,
+                knots[i + 1] - tangents[i + 1] / 3.0,
+                knots[i + 1],
+            ];
             // The hull, not the control points: a cubic lies inside the hull of its four control
             // points, so a clear hull is a clear curve. Testing the control points alone is not
             // enough — the hull's edges can cut across an obstacle between two clear vertices.
-            let hull = [
-                segment.p0,
-                segment.p1,
-                segment.p2,
-                segment.p3,
-            ];
             if !clearance.hull_is_free(&hull) {
-                return Err(PathPlanError::NoPathFound);
+                return Some(i);
             }
-            out.push(segment);
         }
-        Ok(out)
+        None
     }
 }
 

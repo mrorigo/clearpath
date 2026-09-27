@@ -36,7 +36,7 @@ fn request(obstacles: Vec<Polygon>, start: Point2D, goal: Point2D, margin: f64) 
     req
 }
 
-fn clearance_of(req: &RouteRequest) -> Clearance {
+fn clearance_of(req: &RouteRequest) -> Clearance<'_> {
     req.clearance()
 }
 
