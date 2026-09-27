@@ -2,5 +2,26 @@
 name = "pathplan"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.85"
+license = "MIT OR Apache-2.0"
+description = "Deterministic 2D obstacle-avoidance path planning and smooth cubic Bezier fitting"
+categories = ["algorithms", "graphics", "no-std"]
+keywords = ["geometry", "pathfinding", "bezier", "routing", "no-std"]
+
+[features]
+default = ["std"]
+std = ["thiserror/std"]
+simd = []
 
 [dependencies]
+thiserror = { version = "2.0", default-features = false }
+# Unconditional: `no_std` builds need sqrt/sin/cos/acos/atan2/ceil, and gating the dependency
+# behind a feature would push that decision onto the caller.
+libm = "0.2"
+
+[dev-dependencies]
+proptest = "1.6"
+
+[lints.rust]
+missing_docs = "warn"
+unsafe_op_in_unsafe_fn = "deny"

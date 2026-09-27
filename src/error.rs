@@ -1,0 +1,83 @@
+//! Error type for the crate.
+
+use alloc::fmt;
+
+use crate::geom::Point2D;
+
+/// Why an obstacle polygon was rejected at ingest.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum InvalidObstacleReason {
+    /// Fewer than 3 distinct vertices.
+    TooFewVertices,
+    /// A vertex appears more than once in the ring.
+    RepeatedVertex,
+    /// Two consecutive vertices are bitwise equal.
+    ZeroLengthEdge,
+    /// Some coordinate is NaN or infinite.
+    NaNOrInfinite,
+    /// A pair of non-adjacent edges crosses.
+    SelfIntersecting,
+    /// The ring encloses zero area.
+    DegenerateArea,
+    /// The requested margin is too large for this obstacle: its offset ring self-intersects
+    /// because the margin fills a narrow notch in the obstacle.
+    MarginTooLarge,
+}
+
+/// Everything that can go wrong during a route query.
+#[derive(Clone, Copy, Debug, PartialEq)]
+#[non_exhaustive]
+pub enum PathPlanError {
+    /// The start or goal point is inside an obstacle, or exactly on its boundary.
+    EndpointInObstacle {
+        /// The offending point.
+        point: Point2D,
+    },
+    /// The start or goal point is not inside the workspace bounding box.
+    EndpointOutsideWorkspace {
+        /// The offending point.
+        point: Point2D,
+    },
+    /// Start and goal are the same point, so no curve with a well-defined tangent exists.
+    DegenerateEndpoints,
+    /// No feasible path exists between start and goal.
+    NoPathFound,
+    /// The workspace bounding box is empty or inverted.
+    DegenerateWorkspace,
+    /// The requested margin is larger than the workspace, leaving nothing to route in.
+    WorkspaceEroded {
+        /// The margin that was requested.
+        margin: f64,
+    },
+    /// An obstacle polygon was malformed.
+    InvalidObstacle {
+        /// Why it was rejected.
+        reason: InvalidObstacleReason,
+    },
+    /// A `Config` field was out of range.
+    InvalidConfig(&'static str),
+}
+
+impl fmt::Display for PathPlanError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::EndpointInObstacle { point } => {
+                write!(f, "point ({}, {}) is inside or on an obstacle", point.x, point.y)
+            }
+            Self::EndpointOutsideWorkspace { point } => {
+                write!(f, "point ({}, {}) is outside the workspace", point.x, point.y)
+            }
+            Self::DegenerateEndpoints => write!(f, "start and goal are the same point"),
+            Self::NoPathFound => write!(f, "no feasible path exists between start and goal"),
+            Self::DegenerateWorkspace => write!(f, "workspace bounds are empty or inverted"),
+            Self::WorkspaceEroded { margin } => {
+                write!(f, "margin {margin} leaves no workspace to route in")
+            }
+            Self::InvalidObstacle { reason } => write!(f, "invalid obstacle: {reason:?}"),
+            Self::InvalidConfig(why) => write!(f, "invalid configuration: {why}"),
+        }
+    }
+}
+
+impl core::error::Error for PathPlanError {}
