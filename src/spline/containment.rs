@@ -54,16 +54,19 @@ pub fn clamp_and_repair(
     if admissible.first_obstructed(knots, tangents, clearance).is_none() {
         return true;
     }
+    // Only the segments at or after `resume` can have changed, so the scan starts there.
+    let mut resume = 0usize;
     for _ in 0..max_iters {
-        // Find the first obstructed segment and flatten exactly that one. Stopping at the first
-        // rather than testing the whole spline is what keeps the repair proportional to the number
-        // of *broken* segments rather than to the length of the route.
-        let Some(bad) = admissible.first_obstructed(knots, tangents, clearance) else {
+        // Find the first obstructed segment and flatten exactly that one. Stopping at the first,
+        // and not re-testing segments that zeroing cannot have touched, is what keeps the repair
+        // proportional to the number of *broken* segments rather than to the route's length.
+        let Some(bad) = admissible.first_obstructed_from(knots, tangents, clearance, resume) else {
             return true;
         };
         tangents[bad] = Point2D::ZERO;
         tangents[bad + 1] = Point2D::ZERO;
         project_all(admissible, tangents);
+        resume = bad.saturating_sub(1);
     }
     for t in tangents.iter_mut() {
         *t = Point2D::ZERO;

@@ -75,6 +75,10 @@ impl HalfPlane {
 pub struct AdmissibleSet {
     planes: Vec<HalfPlane>,
     knot: Point2D,
+    /// The set's vertices, computed once. The set is immutable, so recomputing them on every
+    /// `project` call — which the repair does once per knot per iteration — was paying for a sort
+    /// and two allocations each time to arrive at the same answer.
+    vertices: Vec<Point2D>,
 }
 
 impl AdmissibleSet {
@@ -96,7 +100,8 @@ impl AdmissibleSet {
                 c: 3.0 * (p.a * knot.x + p.b * knot.y + p.c),
             });
         }
-        Self { planes, knot }
+        let vertices = Self::solve_vertices(&planes);
+        Self { planes, knot, vertices }
     }
 
     /// The knot this set belongs to.
@@ -114,18 +119,18 @@ impl AdmissibleSet {
         self.vertices().is_empty()
     }
 
-    /// The set's vertices, in counter-clockwise order.
+    /// The set's vertices, computed once at construction.
     ///
     /// Every *pair* of half-planes is tried, not just consecutive ones. The set is the
-    /// intersection of two cells' four planes each, and those eight are not in a cyclic order
-    /// around the region, so consecutive pairs miss most of the corners — and the duplicates that
-    /// survive make the projection below return a point outside the set.
-    pub fn vertices(&self) -> Vec<Point2D> {
-        let n = self.planes.len();
+    /// intersection of two cells' four planes each, and those eight are not in a cyclic order around
+    /// the region, so consecutive pairs miss most of the corners — and the duplicates that survive
+    /// make the projection below return a point outside the set.
+    fn solve_vertices(planes: &[HalfPlane]) -> Vec<Point2D> {
+        let n = planes.len();
         let mut out: Vec<Point2D> = Vec::with_capacity(n);
         for i in 0..n {
             for j in (i + 1)..n {
-                let (p, q) = (self.planes[i], self.planes[j]);
+                let (p, q) = (planes[i], planes[j]);
                 let det = p.a * q.b - q.a * p.b;
                 if det.abs() < 1e-12 {
                     continue; // Parallel or coincident: no vertex from this pair.
@@ -137,15 +142,24 @@ impl AdmissibleSet {
                 if !v.is_finite() {
                     continue;
                 }
-                if self.planes.iter().all(|r| r.value(v) >= r.slack())
-                    && !out.iter().any(|w| w.distance(v) < 1e-9)
-                {
+                let inside = planes.iter().all(|r| r.value(v) >= r.slack());
+                if inside && !out.iter().any(|w| w.distance(v) < 1e-9) {
                     out.push(v);
                 }
             }
         }
         out.sort_by(|a, b| a.x.total_cmp(&b.x).then_with(|| a.y.total_cmp(&b.y)));
         out
+    }
+
+    /// The set's vertices, in counter-clockwise order.
+    ///
+    /// Every *pair* of half-planes is tried, not just consecutive ones. The set is the
+    /// intersection of two cells' four planes each, and those eight are not in a cyclic order
+    /// around the region, so consecutive pairs miss most of the corners — and the duplicates that
+    /// survive make the projection below return a point outside the set.
+    pub fn vertices(&self) -> &[Point2D] {
+        &self.vertices
     }
 
     /// The closest admissible tangent to `t`.
@@ -160,7 +174,7 @@ impl AdmissibleSet {
         // The closest point of a convex polygon to an external point lies either on an edge or at
         // a vertex, and a vertex is covered by both of its edges — so the edges alone suffice, and
         // enumerating the vertices as well only guards against a degenerate polygon.
-        let v = self.vertices();
+        let v = &self.vertices;
         if v.is_empty() {
             return Point2D::ZERO;
         }
@@ -175,7 +189,7 @@ impl AdmissibleSet {
                 best = q;
             }
         }
-        for w in &v {
+        for w in v {
             let d2 = w.distance_squared(t);
             if d2 < best_d2 {
                 best_d2 = d2;
@@ -296,6 +310,23 @@ impl AdmissibleTangents {
         tangents: &[Point2D],
         clearance: &Clearance,
     ) -> Option<usize> {
+        self.first_obstructed_from(knots, tangents, clearance, 0)
+    }
+
+    /// As [`AdmissibleTangents::first_obstructed`], but starting the search at `from`.
+    ///
+    /// The repair uses this. Zeroing segment `i`'s tangents changes segments `i-1`, `i` and `i+1`
+    /// and nothing else, and the projection is idempotent, so every segment before `i-1` is
+    /// provably still clear and re-testing them is wasted work. The admissibility check is
+    /// unaffected by the hint and always runs in full, because an inadmissible tangent is a
+    /// different failure from an obstructed one.
+    pub fn first_obstructed_from(
+        &self,
+        knots: &[Point2D],
+        tangents: &[Point2D],
+        clearance: &Clearance,
+        from: usize,
+    ) -> Option<usize> {
         if knots.len() < 2 || tangents.len() != knots.len() {
             return Some(0);
         }
@@ -305,7 +336,7 @@ impl AdmissibleTangents {
                 _ => return Some(i.min(knots.len() - 2)),
             }
         }
-        for i in 0..knots.len() - 1 {
+        for i in from..knots.len() - 1 {
             let hull = [
                 knots[i],
                 knots[i] + tangents[i] / 3.0,

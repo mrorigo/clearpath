@@ -77,24 +77,37 @@ Measured on an aarch64 core, release build, 1000×1000 workspace, axis-aligned b
 
 | Obstacles | `route_smooth`, margin 0 | margin 1 |
 | --- | --- | --- |
-| 10 | 37 µs | 35 µs |
-| 50 | 330 µs | 222 µs |
-| 200 | 1.33 ms | 1.07 ms |
+| 10 | 26 µs | 16 µs |
+| 50 | 118 µs | 90 µs |
+| 200 | 713 µs | 649 µs |
 
-The specification's original target was 50 µs for 10–50 boxes. It was missed by 3x at the start of
-the optimisation pass and is now **met at 10 boxes**; 50 boxes is still 7x over.
+The specification's original target was 50 µs for 10–50 boxes. It was missed by 3x when the
+optimisation pass started and is now **met at 10 boxes with a 2x margin**; 50 boxes is 2.4x over.
+10 boxes went 157 µs → 26 µs and 50 boxes 510 µs → 118 µs.
 
 The stage split is not where the design suggests, and that is the most useful thing the benchmarks
-produced. At 10 boxes the sweep is 8 µs of 37 µs. The *funnel* was 77 µs — half the query — and
-none of it was the funnel's geometry: it was the corridor-membership check, which sampled every
-segment twice per unit of length and asked each sample whether any corridor cell contained it. A
-sample standing in for a proof, two thousand exact predicates per long segment. Stating it exactly
-instead — a cell is a trapezoid, so containment is a pair of half-interval intersections — took that
-stage to 0.4 µs, and the query with it from 157 µs to 37 µs.
+produced. At 10 boxes the sweep is 7.7 µs. The *funnel* was 77 µs — half the query — and none of
+it was the funnel's geometry: it was the corridor-membership check, which sampled every segment
+twice per unit of length and asked each sample whether any corridor cell contained it. A sample
+standing in for a proof, two thousand exact predicates per long segment. Stating it exactly — a
+cell is a trapezoid, so containment is a pair of half-interval intersections — took that stage to
+0.4 µs.
 
-A warm query still makes 160 allocations at 10 boxes (332 at 50). That is down from 292 and 657,
-but **the zero-allocation goal of `docs/SPEC.md` §8.1 is not met**: roughly one `Vec` per stage
-remains, plus the decomposition is rebuilt per query.
+The repair had the same shape of problem. Its obstacle loop was gated on the *hull's* bounding box,
+but a control hull on a long route is long and thin, so its box is most of the workspace and every
+obstacle passed it: 960 segment tests per query at 10 boxes, 6000 at 50. Replacing that proxy with
+an exact local test — does this hull *edge* come within `margin` of this obstacle's box? — is a slab
+test, and it took the repair from 25 µs to 7.6 µs.
+
+**A spatial index was not built, because the measurements did not call for one.** The cost was never
+a lack of locality in the data; it was a bad locality proxy in the query, and four comparisons
+answer that exactly where a lookup would answer it approximately. A grid remains the right answer
+for a query that genuinely spans the workspace, and is the next step if the obstacle count grows
+enough for the linear scan to dominate again.
+
+A warm query still makes 124 allocations at 10 boxes (272 at 50), down from 292 and 657, but **the
+zero-allocation goal of `docs/SPEC.md` §8.1 is not met**: roughly one `Vec` per stage remains,
+plus the decomposition is rebuilt per query.
 
 ## Development
 

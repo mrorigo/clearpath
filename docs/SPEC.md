@@ -871,8 +871,8 @@ A warm query, measured with a counting global allocator (`tests/allocations.rs`)
 
 | Obstacles | Warm | Cold |
 | --- | --- | --- |
-| 10 | 160 allocations, 12.6 kB | 166 allocations, 13.1 kB |
-| 50 | 332 allocations, 32.3 kB | 339 allocations, 33.6 kB |
+| 10 | 124 allocations, 10.9 kB | 130 allocations, 11.4 kB |
+| 50 | 272 allocations, 29.5 kB | 279 allocations, 30.8 kB |
 
 **Still not zero, and the zero-allocation goal is not met.** What remains is roughly one `Vec` per
 stage — the funnel's portal and sign lists, the corridor, the knots, the tangents, the admissible
@@ -887,14 +887,14 @@ this one. The `Vec`-of-`Vec` structures that dominated the earlier count are gon
 
 | Obstacles | margin 0 | margin 1 |
 | --- | --- | --- |
-| 10 | **37 us** | 35 us |
-| 50 | **330 us** | 222 us |
-| 200 | **1.33 ms** | 1.07 ms |
+| 10 | **26 us** | 16 us |
+| 50 | **118 us** | 90 us |
+| 200 | **713 us** | 649 us |
 
 `route_orthogonal`: 10 boxes 7.1 us, 50 boxes 92 us.
 
-**The original "< 50 us for 10-50 boxes" target is now met at 10 boxes and missed by 7x at 50.** The
-optimisation pass moved it from 157 us and 510 us, a 4.3x and 3.5x improvement.
+**The original "< 50 us for 10-50 boxes" target is now met at 10 boxes with a 2x margin, and missed
+by 2.4x at 50.** The optimisation pass moved 10 boxes from 157 us and 50 from 510 us: 6x and 4.3x.
 
 The margin makes queries *faster*, not slower, which is worth stating because the opposite is
 intuitive: square inflation adds no vertices (unlike an arc approximation), so the sweep sees
@@ -904,11 +904,17 @@ exactly the same event count and only the free-space test changes.
 
 | Stage | Before | After |
 | --- | --- | --- |
-| `decomp` — the sweep | 9.4 us | 8.3 us |
-| `funnel::cell_search` — the A\* | 0.96 us | 1.0 us |
-| `funnel::string_pull` | **77 us** | **0.42 us** |
-| `spline::solver` — the tangent solve | 0.25 us | 0.28 us |
-| `spline::containment` — the repair | 31 us | 30 us |
+| Stage | Before | After |
+| --- | --- | --- |
+| `decomp` — the sweep | 9.4 us | 7.7 us |
+| `funnel::cell_search` — the A\* | 0.96 us | 0.93 us |
+| `funnel::string_pull` | **77 us** | **0.39 us** |
+| `spline::solver` — the tangent solve | 0.25 us | 0.25 us |
+| `spline::containment` — the repair | 31 us | **7.6 us** |
+
+(Before is the state at M8; the "after" column is measured with `margin = 0` at 10 boxes. The
+totals do not sum to the end-to-end figure because the remainder is the per-query glue: building the
+`Clearance`, and the final `control_points`.)
 
 The funnel's own geometry was never the cost. Its *corridor-membership check* was, because it
 sampled every segment twice per unit of length and asked each sample whether any corridor cell
@@ -919,10 +925,32 @@ cell over an abscissa range is a pair of half-interval intersections, and the se
 corridor when those intervals cover its range — is a 180x improvement on that stage and a 4.3x
 improvement end to end.
 
-The repair is now the largest single stage. It is dominated by exact predicates in
-`Clearance::hull_is_free`, which is `O(hull edges x obstacle edges)` with a square root per test.
-The next targets, in order: a spatial index over obstacle edges so the hull test only considers
-nearby ones, then carrying the scratch through the remaining stages for the allocation goal.
+The repair went from 31 us to 7.6 us, and the reason is the second half of the same lesson. The hull
+test was `O(hull edges x obstacles x obstacle edges)` and the obstacle loop was gated on the
+*hull's* bounding box — but a control hull on a long route is long and thin, so its box is most of
+the workspace and every obstacle passed it. Instrumenting a real route (rather than a synthetic
+hull, which is what misled the first attempt at this) showed 960 segment-versus-segment tests per
+query at 10 boxes and **6000 at 50**, and that the binding term scaled with obstacle count.
+
+Replacing that proxy with an exact local test — does this hull *edge* come within `margin` of this
+obstacle's box? — is a slab test, and it removes 90% of the work:
+
+    stage/repair_10_boxes    25 us -> 7.6 us
+    stage/repair_50_boxes   111 us -> 24 us
+    stage/repair_200_boxes  272 us -> 60 us
+
+**A spatial index was not built, and the measurements say it is not needed for this shape.** The
+cost was never the absence of locality in the *data* — it was a bad locality proxy in the
+*query*. An index would have answered "which obstacles are near this edge" with a lookup; four
+comparisons answer the same question exactly, because the query is a single short segment and the
+prune is exact rather than conservative. A grid would still be the right answer for a query that
+genuinely spans the workspace — the hull's long closing edge is such a query — and it remains the
+right next step if the obstacle count grows far enough for the linear scan to dominate again.
+
+The bug that prune introduced is worth recording, because it is the same failure mode twice: the
+first version of it tested the *un-grown* obstacle box, so it skipped exactly the edges that graze
+the obstacle without touching it. A curve can be clear of an obstacle and still inside its margin,
+and that is the case the margin exists for. The property tests caught it on the first run.
 
 ### 8.3 Benchmarks
 

@@ -43,6 +43,35 @@ impl<'a> Clearance<'a> {
         self.obstacles
     }
 
+    /// The tolerance used when comparing against a bounding box, in distance units.
+    fn slack(&self) -> f64 {
+        1e-9 * self.margin.abs().max(1.0)
+    }
+
+    /// Whether `p` is at least `margin` away (less `slack`) from the segment `c..d`.
+    ///
+    /// Rejects on the segment's own box first, so the common case — a vertex nowhere near this edge
+    /// of the hull — costs four comparisons rather than a projection and a square root.
+    fn point_near_segment(&self, p: Point2D, c: Point2D, d: Point2D, slack: f64) -> bool {
+        let (dx, dy) = (d.x - c.x, d.y - c.y);
+        let lo_x = c.x.min(d.x) - self.margin;
+        let hi_x = c.x.max(d.x) + self.margin;
+        let lo_y = c.y.min(d.y) - self.margin;
+        let hi_y = c.y.max(d.y) + self.margin;
+        if p.x < lo_x || p.x > hi_x || p.y < lo_y || p.y > hi_y {
+            return true;
+        }
+        let len2 = dx * dx + dy * dy;
+        let q = if len2 == 0.0 {
+            c
+        } else {
+            let t = ((p.x - c.x) * dx + (p.y - c.y) * dy) / len2;
+            let t = t.clamp(0.0, 1.0);
+            Point2D::new(c.x + t * dx, c.y + t * dy)
+        };
+        q.distance(p) >= self.margin - slack
+    }
+
     /// Whether `p` is in the free space.
     ///
     /// A distance test, not a containment test: at `margin == 0` a taut path's knots lie exactly on
@@ -96,8 +125,10 @@ impl<'a> Clearance<'a> {
     /// tested for being inside the hull. Sampling the hull instead is what let a corner clip
     /// through.
     pub fn hull_is_free(&self, points: &[Point2D]) -> bool {
-        let hull = convex_hull(points);
-        for p in &hull {
+        let mut buffer = [Point2D::ZERO; 8];
+        let count = hull_into(points, &mut buffer);
+        let hull = &buffer[..count];
+        for p in hull {
             if !self.is_free(*p) {
                 return false;
             }
@@ -105,13 +136,39 @@ impl<'a> Clearance<'a> {
         if hull.len() < 2 {
             return true;
         }
+        // The hull's own box, to skip whole obstacles.
+        let mut hbox = BoundingBox::new(hull[0], hull[0]);
+        for p in hull {
+            hbox = hbox.with(*p);
+        }
         for obstacle in self.obstacles {
+            let b = obstacle.bounds();
+            if hbox.max.x < b.min.x - self.margin - self.slack()
+                || hbox.min.x > b.max.x + self.margin + self.slack()
+                || hbox.max.y < b.min.y - self.margin - self.slack()
+                || hbox.min.y > b.max.y + self.margin + self.slack()
+            {
+                continue;
+            }
             let ring = obstacle.vertices();
             for k in 0..hull.len() {
                 // The hull's closing polyline, which for a two-point hull is the segment itself.
                 // That case matters: a zero-tangent segment is exactly two points, and checking only
                 // its endpoints would accept a segment that passes through an obstacle.
                 let (c, d) = (hull[k], hull[(k + 1) % hull.len()]);
+                // The local rejection. The hull's box passed this obstacle, which says very
+                // little: the hull is long and thin, so its box is most of the workspace. This says
+                // whether the edge *itself* can come within `margin` of the obstacle's box — grown by
+                // the margin, because the check below is about the margin and not about contact. An
+                // un-grown box here skips exactly the edges that graze: a curve can be clear of the
+                // obstacle and still inside its margin, and that is the case the margin exists for.
+                let grown = BoundingBox {
+                    min: Point2D::new(b.min.x - self.margin, b.min.y - self.margin),
+                    max: Point2D::new(b.max.x + self.margin, b.max.y + self.margin),
+                };
+                if !segment_meets_box(c, d, grown) {
+                    continue;
+                }
                 for i in 0..ring.len() {
                     if segments_cross_properly(ring[i], ring[(i + 1) % ring.len()], c, d) {
                         return false;
@@ -128,8 +185,7 @@ impl<'a> Clearance<'a> {
                 // against the segment is sufficient.
                 let slack = 1e-9 * self.margin.abs().max(1.0);
                 for v in ring {
-                    let q = crate::corridor::closest_point_on_segment(*v, c, d);
-                    if q.distance(*v) < self.margin - slack {
+                    if !self.point_near_segment(*v, c, d, slack) {
                         return false;
                     }
                 }
@@ -139,7 +195,7 @@ impl<'a> Clearance<'a> {
             // degenerate hull, so it is skipped there.
             if hull.len() >= 3 {
                 for v in ring {
-                    if point_strictly_in_convex(&hull, *v) {
+                    if point_strictly_in_convex(hull, *v) {
                         return false;
                     }
                 }
@@ -163,40 +219,123 @@ pub fn distance_to_ring(p: Point2D, ring: &[Point2D]) -> f64 {
     best
 }
 
-/// The convex hull of a small point set, counter-clockwise, without repeating the first point.
+/// The convex hull of up to four points, counter-clockwise, without repeating the first point.
 ///
-/// Andrew's monotone chain. Used on a handful of control points, so the sort is by orientation
-/// against the chosen extreme and ties fall back to the coordinates, which keeps it a
-/// deterministic function of the input.
+/// Every caller passes a Bezier segment's four control points, and this was one allocation and one
+/// sort per hull test — and the repair runs a hull test per segment per iteration. Four points fit
+/// in a fixed array, so the sort is an insertion sort over that and nothing is allocated.
 pub fn convex_hull(points: &[Point2D]) -> Vec<Point2D> {
-    let mut pts: Vec<Point2D> = points.to_vec();
-    pts.sort_by(|a, b| {
-        a.x.total_cmp(&b.x).then_with(|| a.y.total_cmp(&b.y))
-    });
-    pts.dedup();
-    if pts.len() < 3 {
-        return pts;
-    }
-    let lower = half(&pts);
-    let upper = half(&pts.iter().rev().copied().collect::<Vec<_>>());
-    // `lower` runs from the first point to the last, `upper` from the last back to the first, so
-    // each contributes both duplicated endpoints. Dropping the last of each closes the ring.
-    let mut out: Vec<Point2D> = lower[..lower.len() - 1].to_vec();
-    out.extend_from_slice(&upper[..upper.len() - 1]);
-    out
+    let mut buffer = [Point2D::ZERO; 8];
+    let count = hull_into(points, &mut buffer);
+    buffer[..count].to_vec()
 }
 
-fn half(sorted: &[Point2D]) -> Vec<Point2D> {
-    let mut out: Vec<Point2D> = Vec::with_capacity(sorted.len());
-    for &p in sorted {
-        while out.len() >= 2
-            && orient2d(out[out.len() - 2], out[out.len() - 1], p) != Orientation::CounterClockwise
-        {
-            out.pop();
+/// The convex hull of up to four points, into a caller-supplied buffer, returning the count.
+///
+/// `hull_is_free` runs once per segment per repair iteration, and it allocated three `Vec`s each
+/// time — two chains and the output. Four input points can produce at most four hull vertices, so
+/// a fixed buffer removes the allocations entirely and the repair stops being allocation-bound.
+pub fn hull_into(points: &[Point2D], out: &mut [Point2D]) -> usize {
+    debug_assert!(out.len() >= 8);
+    let mut pts: [Point2D; 4] = [Point2D::ZERO; 4];
+    let n = points.len().min(4);
+    pts[..n].copy_from_slice(&points[..n]);
+    for i in 1..n {
+        let key = pts[i];
+        let mut j = i;
+        while j > 0 && less(&pts[j - 1], &key) {
+            pts[j] = pts[j - 1];
+            j -= 1;
         }
-        out.push(p);
+        pts[j] = key;
     }
-    out
+    // Deduplicate: the control points of a zero-tangent segment repeat.
+    let mut len = 0usize;
+    for i in 0..n {
+        let p = pts[i];
+        if len == 0 || pts[len - 1] != p {
+            pts[len] = p;
+            len += 1;
+        }
+    }
+    let sorted = &pts[..len];
+    if len < 3 {
+        for (i, p) in sorted.iter().enumerate() {
+            out[i] = *p;
+        }
+        return len;
+    }
+    // Two monotone chains over a fixed buffer: `lower` from the first point to the last, `upper`
+    // back again, so each carries both duplicated endpoints and the ring closes by dropping the
+    // last of each.
+    let mut lower: [Point2D; 4] = [Point2D::ZERO; 4];
+    let mut upper: [Point2D; 4] = [Point2D::ZERO; 4];
+    let (mut ln, mut un) = (0usize, 0usize);
+    for p in sorted.iter() {
+        while ln >= 2 && orient2d(lower[ln - 2], lower[ln - 1], *p) != Orientation::CounterClockwise {
+            ln -= 1;
+        }
+        lower[ln] = *p;
+        ln += 1;
+    }
+    for p in sorted.iter().rev() {
+        while un >= 2 && orient2d(upper[un - 2], upper[un - 1], *p) != Orientation::CounterClockwise {
+            un -= 1;
+        }
+        upper[un] = *p;
+        un += 1;
+    }
+    let mut count = 0usize;
+    for p in lower.iter().take(ln.saturating_sub(1)) {
+        out[count] = *p;
+        count += 1;
+    }
+    for p in upper.iter().take(un.saturating_sub(1)) {
+        out[count] = *p;
+        count += 1;
+    }
+    count
+}
+
+/// Lexicographic order on the bit patterns, so the sort is a total order and the hull is a
+/// deterministic function of the input.
+fn less(a: &Point2D, b: &Point2D) -> bool {
+    a.x.total_cmp(&b.x) == core::cmp::Ordering::Less
+        || (a.x == b.x && a.y.total_cmp(&b.y) == core::cmp::Ordering::Less)
+}
+
+/// Whether the closed segment `a..b` meets the axis-aligned box, by the slab method.
+///
+/// This is the cheap local test that the hull's own bounding box cannot be. A control hull on a
+/// long route is long and thin, so its box covers most of the workspace and every obstacle passes
+/// it — but the hull's individual *edges* are mostly short, and this rejects the obstacles each one
+/// cannot reach before any segment-versus-segment work happens. Measured on a real route, that was
+/// the difference between six thousand segment tests per query and a few hundred.
+pub fn segment_meets_box(a: Point2D, b: Point2D, extent: BoundingBox) -> bool {
+    let mut t0 = 0.0f64;
+    let mut t1 = 1.0f64;
+    for (p, d, lo, hi) in [
+        (a.x, b.x - a.x, extent.min.x, extent.max.x),
+        (a.y, b.y - a.y, extent.min.y, extent.max.y),
+    ] {
+        if d == 0.0 {
+            // Parallel to this slab: outside it means no intersection at all.
+            if p < lo || p > hi {
+                return false;
+            }
+        } else {
+            let (mut near, mut far) = ((lo - p) / d, (hi - p) / d);
+            if near > far {
+                core::mem::swap(&mut near, &mut far);
+            }
+            t0 = t0.max(near);
+            t1 = t1.min(far);
+            if t0 > t1 {
+                return false;
+            }
+        }
+    }
+    true
 }
 
 /// Whether `p` is inside the convex polygon `poly`, given that it may lie on the boundary.

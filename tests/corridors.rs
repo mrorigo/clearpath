@@ -83,7 +83,7 @@ fn check(obstacles: &[Polygon], margin: f64, start: Point2D, goal: Point2D) {
         }
         // The vertices, when they exist, are all admissible.
         for v in set.vertices() {
-            assert!(set.contains(v), "vertex {v:?} of set {i} is not admissible");
+            assert!(set.contains(*v), "vertex {v:?} of set {i} is not admissible");
         }
     }
 
