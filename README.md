@@ -49,14 +49,7 @@ The name changed to `clearpath` because `pathplan` describes the provenance rath
 guarantee, and because it is not how a Rust crate's name reads. `docs/SPEC.md` keeps the old name
 wherever the derivation is the point.
 
-**On the licence.** This crate is MIT OR Apache-2.0. That is sound because nothing was derived
-from Graphviz — the shared artefact is an idea, not code — but the distinction is a real one and
-worth confirming against Graphviz's own licence terms before publishing, particularly since the
-name was chosen partly *because* of where this project came from. If you want the lineage to be
-airtight, `docs/SPEC.md` §6 and §7.2 describe the algorithms concretely enough to check each one
-against its own source.
-
-**The algorithms this actually implements**, for anyone checking the lineage:
+**The algorithms this actually implements**:
 
 * the vertical (trapezoidal) decomposition of a polygonal domain — standard computational
   geometry;
