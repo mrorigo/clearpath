@@ -46,6 +46,19 @@ if [ -f src/spline/simd.rs ] && ! grep -q 'allow(unsafe_code)' src/spline/simd.r
 fi
 pass "no unsafe outside src/spline/simd.rs"
 
+echo "==> licence"
+# A dual-licensed crate must ship both texts, and the placeholders in them must be filled: a
+# licence naming nobody is not a licence. This fails rather than warns, so an unfilled file cannot
+# reach crates.io by being overlooked.
+for f in LICENSE-MIT LICENSE-APACHE; do
+    [ -f "$f" ] || fail "$f is missing; the crate declares MIT OR Apache-2.0"
+done
+if grep -qE '<YEAR>|<COPYRIGHT HOLDER>|\[yyyy\]|<year>|<copyright holders>' LICENSE-MIT LICENSE-APACHE; then
+    grep -nE '<YEAR>|<COPYRIGHT HOLDER>|\[yyyy\]|<year>|<copyright holders>' LICENSE-MIT LICENSE-APACHE >&2
+    fail "licence placeholders are unfilled"
+fi
+pass "licence texts present and filled"
+
 echo "==> tests"
 cargo test --all-features
 pass "tests"
