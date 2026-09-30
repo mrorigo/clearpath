@@ -22,6 +22,79 @@ fn request(obstacles: Vec<Polygon>, start: Point2D, goal: Point2D, margin: f64) 
     req
 }
 
+/// The smooth router used to return a curve that dips a rounding step *into* an obstacle.
+///
+/// The knots here lie exactly on an obstacle's bottom face, which is the normal case: a taut path
+/// runs along obstacle boundaries. Reconstructing a control point as `knot + t/3` then lands a
+/// fraction of an ulp inside. `is_free` used to accept any point with a non-zero distance to the
+/// ring, so such a point was reported free, and the router shipped a curve through the obstacle.
+#[test]
+fn a_smooth_route_does_not_dip_into_an_obstacle_along_its_face() {
+    let obstacles = vec![
+        Polygon::new(vec![
+            Point2D::new(17.141496085405187, 32.0138540651721),
+            Point2D::new(24.96953883992036, 32.0138540651721),
+            Point2D::new(24.96953883992036, 36.372611485923045),
+            Point2D::new(17.141496085405187, 36.372611485923045),
+        ])
+        .unwrap(),
+        Polygon::new(vec![
+            Point2D::new(19.095236231747986, 27.62985896618443),
+            Point2D::new(27.697157282844046, 27.62985896618443),
+            Point2D::new(27.697157282844046, 31.91034886387489),
+            Point2D::new(19.095236231747986, 31.91034886387489),
+        ])
+        .unwrap(),
+        Polygon::new(vec![
+            Point2D::new(25.770223685062522, 34.581371709157494),
+            Point2D::new(30.998363789697283, 34.581371709157494),
+            Point2D::new(30.998363789697283, 46.52180991237389),
+            Point2D::new(25.770223685062522, 46.52180991237389),
+        ])
+        .unwrap(),
+    ];
+    let req = request(
+        obstacles,
+        Point2D::new(14.906697685761042, 44.91714569699075),
+        Point2D::new(36.08902029423311, 82.93933742844784),
+        0.0,
+    );
+    let mut planner = PathPlanner::new();
+    let segments = planner.route_smooth(&req).expect("a route exists");
+
+    let clearance = clearance_of(&req);
+    for (i, seg) in segments.iter().enumerate() {
+        for k in 0..=4000 {
+            let t = k as f64 / 4000.0;
+            let point = seg.evaluate(t);
+            assert!(
+                clearance.is_free(point),
+                "segment {i} leaves the free space at t={t}: {point:?}"
+            );
+        }
+    }
+}
+
+/// `is_free` is the predicate every part of the crate trusts when it certifies a route, so it
+/// must never report a point inside an obstacle as free — and must keep the boundary free, which
+/// is what the knots rely on.
+#[test]
+fn a_point_inside_an_obstacle_is_never_free() {
+    let square = box_poly([0.0, 0.0, 10.0, 20.0]);
+    let clearance = Clearance::new(std::slice::from_ref(&square), WORKSPACE, 0.0);
+    // Depths well past the boundary tolerance: a point a rounding step inside is what the bug
+    // turned on, but the tolerance is deliberately a length, so a point within it stays free.
+    for (i, y) in [19.9, 19.99, 19.999, 19.99999].iter().enumerate() {
+        let point = Point2D::new(5.0, *y);
+        assert!(square.contains(point), "sanity: {point:?} should be inside");
+        assert!(!clearance.is_free(point), "{point:?} is inside the square but reported free ({i})");
+    }
+    // And the boundary itself stays free, which is what knots rely on.
+    assert!(clearance.is_free(Point2D::new(5.0, 20.0)));
+    assert!(clearance.is_free(Point2D::new(5.0, 0.0)));
+    assert!(clearance.is_free(Point2D::new(0.0, 10.0)));
+}
+
 fn clearance_of(req: &RouteRequest) -> Clearance<'_> {
     req.clearance()
 }
