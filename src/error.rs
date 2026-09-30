@@ -20,6 +20,12 @@ pub enum InvalidObstacleReason {
     SelfIntersecting,
     /// The ring encloses zero area.
     DegenerateArea,
+    /// The shoelace area overflowed, so the ring's orientation is not a number.
+    ///
+    /// The sum is a running total of cross terms, so a coordinate beyond roughly
+    /// `sqrt(f64::MAX)` overflows it. The result is `NaN`, and a ring accepted with a
+    /// `NaN` area has no usable orientation.
+    AreaOverflow,
 }
 
 /// Everything that can go wrong during a route query.

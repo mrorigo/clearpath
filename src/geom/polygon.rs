@@ -129,7 +129,16 @@ impl Polygon {
         if !is_convex_ring(&vertices) && is_self_intersecting(&vertices) {
             return Err(Self::err(InvalidObstacleReason::SelfIntersecting));
         }
+        // The shoelace sum is a running sum of `x_i * y_j - x_j * y_i` terms, so a coordinate
+        // beyond roughly sqrt(MAX) overflows it: the sum reaches +inf and then -inf, and their
+        // sum is NaN. Both tests below are false for NaN, so such a ring would sail through
+        // with an area that is not a number -- and a ring whose sign is unknown makes every
+        // orientation test on it arbitrary. In practice that meant `contains` reporting the
+        // interior of a 1e300-sized square as outside, i.e. the obstacle was invisible.
         let area = signed_area(&vertices);
+        if !area.is_finite() {
+            return Err(Self::err(InvalidObstacleReason::AreaOverflow));
+        }
         if area == 0.0 {
             return Err(Self::err(InvalidObstacleReason::DegenerateArea));
         }
@@ -435,6 +444,35 @@ mod tests {
             Polygon::new(v).unwrap_err(),
             PathPlanError::InvalidObstacle { reason: InvalidObstacleReason::RepeatedVertex }
         );
+    }
+
+    /// A ring whose shoelace area overflows to `NaN` used to be accepted, because
+    /// `NaN == 0.0` and `NaN < 0.0` are both false. Its orientation was therefore
+    /// unknown, and `contains` reported the interior of a 1e300-sized square as
+    /// outside — the obstacle was invisible to the planner.
+    #[test]
+    fn rejects_a_ring_whose_area_overflows() {
+        let huge = |m: f64| {
+            vec![
+                Point2D::new(m, m),
+                Point2D::new(m * 1.0000001, m),
+                Point2D::new(m * 1.0000001, m * 1.0000001),
+                Point2D::new(m, m * 1.0000001),
+            ]
+        };
+        for m in [1e155, 1e200, 1e300, 1e308] {
+            assert_eq!(
+                Polygon::new(huge(m)).unwrap_err(),
+                PathPlanError::InvalidObstacle { reason: InvalidObstacleReason::AreaOverflow },
+                "a {m:e}-sized square should be rejected, not accepted with a NaN area"
+            );
+        }
+        // A large square whose area is still representable must still be accepted; the
+        // test is that the area is a number, not that it is small.
+        for m in [1e150, 1e154] {
+            let poly = Polygon::new(huge(m)).expect("a representable area is still valid");
+            assert!(poly.area().is_finite());
+        }
     }
 
     #[test]
