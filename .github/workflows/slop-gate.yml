@@ -92,7 +92,6 @@ jobs:
         shell: bash
         run: echo "version=$(slop-gate --version | awk '{print $NF}')" >> "$GITHUB_OUTPUT"
       - uses: actions/cache/restore@v4
-        id: restore-index
         with:
           path: .slop-gate/index.json
           # See the note on the push job: the tool version must be in the key or a stale index is
