@@ -6,9 +6,20 @@ All notable changes to this project are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.1.1] — 2026-09-30
+
 ### Fixed
 
-- `PathPlanner::route_smooth` no longer returns a curve that passes through an obstacle. A taut
+- `PathPlanner::route_orthogonal` no longer returns a route that crosses an obstacle. The route
+  was verified by sampling nine points per leg, so any blocked stretch narrower than an eighth of
+  a leg fell between two samples and the route was returned as clear. The verification is now
+  exact — each leg is tested against every obstacle edge. Reachable whenever an obstacle is not
+  its own bounding box: the Hanan grid is built from bounding-box faces, so a slanted face can
+  cross a cell the grid certified on its centre alone. Found by fuzzing: 39 of 20 000 random
+  queries produced a colliding route.
+
+- `PathPlanner::route_smooth` no longer returns a curve that passes through an obstacle. Found by
+  fuzzing: 20 of 20 000 random queries produced one, the deepest penetration 1.4e-14. A taut
   path runs along obstacle faces, and reconstructing a control point as `knot + t/3` lands a
   fraction of an ulp inside the face. `Clearance::is_free` accepted any point with a non-zero
   distance to the obstacle's ring, so such a point was reported free and the curve was shipped
@@ -16,14 +27,6 @@ All notable changes to this project are recorded here. The format follows
   tolerance inside, which is the same tolerance the rest of the clearance tests use.
 - `Clearance::is_free` and `Clearance::hull_is_free` derive their boundary tolerance from one
   place, so the test that certifies a route and the test that checks it cannot disagree.
-
-## [0.1.0] — unreleased
-- `PathPlanner::route_orthogonal` no longer returns a route that crosses an obstacle. The route
-  was verified by sampling nine points per leg, so any blocked stretch narrower than an eighth of
-  a leg fell between two samples and the route was returned as clear. The verification is now
-  exact — each leg is tested against every obstacle edge. This is reachable whenever an obstacle
-  is not its own bounding box: the Hanan grid is built from bounding-box faces, so a slanted face
-  can cross a cell the grid certified on its centre alone.
 
 ## [0.1.0]
 
