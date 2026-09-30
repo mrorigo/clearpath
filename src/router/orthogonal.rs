@@ -88,13 +88,17 @@ pub fn route_orthogonal(
 
     // The polyline is verified rather than trusted. The grid geometry is what makes it correct, and
     // a verification is what catches it when that reasoning is wrong.
+    //
+    // The verification is exact, not sampled. `Grid` is built from each obstacle's *bounding box*,
+    // so for a non-rectangular obstacle a face can cross a cell's interior even though no grid
+    // line does; the cell's centre then decides a cell that is only partly free. Sampling a leg at
+    // a handful of points cannot see that — a blocked stretch narrower than the sample spacing
+    // falls between two samples and the route is returned straight through the obstacle.
+    // `hull_is_free` tests the leg against every obstacle edge, and a two-point hull is the leg.
     let clearance = req.clearance();
     for w in polyline.points.windows(2) {
-        for k in 0..=8 {
-            let q = w[0].lerp(w[1], k as f64 / 8.0);
-            if !clearance.is_free(q) {
-                return Err(PathPlanError::NoPathFound);
-            }
+        if !clearance.hull_is_free(w) {
+            return Err(PathPlanError::NoPathFound);
         }
     }
     Ok(polyline)
