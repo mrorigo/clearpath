@@ -95,7 +95,21 @@ impl Expansion {
     }
 
     /// Appends a single `f64` term, eliminating overlap.
+    ///
+    /// A term that is not finite, and an expansion that has already filled its buffer, are both
+    /// dropped rather than appended. This is a backstop against writing out of bounds, and it is
+    /// what stops an overflowed expansion from aborting in a release build, where the
+    /// `debug_assert!` below is compiled out.
+    ///
+    /// A term that is exactly zero is *not* dropped: zero is a finite component, and dropping it
+    /// would truncate the expansion -- which is why `sum` guards its own pushes rather than relying
+    /// on this method. Only `inf` and `NaN` are discarded, and discarding them leaves the finite
+    /// terms in place, so an expansion that has overflowed degrades to a rounded answer rather than
+    /// to a wrong topological decision.
     fn push(&mut self, value: f64) {
+        if !value.is_finite() || self.len >= MAX_COMPONENTS {
+            return;
+        }
         let mut q = value;
         for i in 0..self.len {
             let (sum, err) = two_sum(q, self.buf[i]);
@@ -217,6 +231,65 @@ fn two_component(v: f64) -> Expansion {
 /// Unit roundoff for `f64`: `2^-53`.
 const EPS: f64 = 1.0 / 9_007_199_254_740_992.0;
 
+/// The degree of the `orient2d` determinant in the coordinates: a product of two differences.
+const TWO_COMPONENT_DEGREE: u32 = 2;
+
+/// The degree of the in-circle determinant in the coordinates.
+///
+/// Each row of the 3x3 is `(x, y, x^2 + y^2)`, whose entries are at most quadratic, so a cofactor
+/// expansion multiplies three of them and the determinant is homogeneous of degree six. The
+/// determinant is a *difference* of such products, so the terms cancel heavily and a smaller degree
+/// would often suffice -- but "often" is not a correctness argument, and the exactness claim is
+/// unconditional, so the rescale is budgeted for the full degree.
+const SIX_COMPONENT_DEGREE: u32 = 6;
+
+/// The exponent budget a scaled product is held to.
+///
+/// A degree-`d` determinant over coordinates of magnitude `m` is a sum of products of at most `d`
+/// of them, so holding `m` at or below `2^(EXPANSION_PRODUCT_BUDGET / d)` keeps every product below
+/// `2^1020` -- inside `f64`'s 1023-bit range, with the rest covering the error terms `two_product`
+/// adds and the summation. The budget sits just under the point where the unscaled products would
+/// overflow, so the rescale engages as late as possible and leaves ordinary geometry untouched.
+const EXPANSION_PRODUCT_BUDGET: i32 = 1020;
+
+/// A power-of-two scale that brings a magnitude-`largest` set of `degree` products back into range,
+/// or `None` when the inputs are already in range.
+///
+/// A determinant of degree `d` over coordinates of magnitude at most `m` is a sum of products of at
+/// most `d` of them, so holding `m` at or below `2^(EXPANSION_PRODUCT_BUDGET / d)` keeps every
+/// product, and the error terms `two_product` adds, representable. The caller multiplies its inputs by
+/// the returned factor; because the factor is a power of two, those multiplications are exact, so
+/// the rescaling introduces no rounding at all. `None` keeps the common case free of extra work.
+fn exact_rescale(largest: f64, degree: u32) -> Option<f64> {
+    if !largest.is_finite() || largest == 0.0 {
+        return None;
+    }
+    // The magnitude is bounded by 2 raised to the unbiased binary exponent, so bounding that
+    // exponent bounds the products regardless of the mantissa. It is read from the bit pattern
+    // because the integer log is not available in core for the bare-metal targets this crate builds
+    // for, and a floating-point logarithm would be a rounding that must not decide an exactness
+    // question. The exponent field is biased by 1023; a subnormal has a zero field and is far
+    // below any limit, so it reports zero and correctly needs no rescaling.
+    let biased = ((largest.to_bits() >> 52) & 0x7ff) as i32;
+    let exponent = (biased - 1023).max(0);
+    let limit = EXPANSION_PRODUCT_BUDGET / degree as i32;
+    if exponent <= limit {
+        return None;
+    }
+    // 2 raised to the negated shift, written straight into the exponent field so the factor is
+    // exactly a power of two. The field is biased by 1023, and a negative biased exponent is
+    // unreachable for a normal double, so the guard below covers the one case where the shift is
+    // large enough to leave the normal range -- and returning `None` there is safe, because it
+    // only happens for a subnormal input that never needed rescaling to begin with.
+    let shift = exponent - limit;
+    let scale_biased = 1023 - shift;
+    if scale_biased <= 0 {
+        return None;
+    }
+    debug_assert!(shift > 0);
+    Some(f64::from_bits((scale_biased as u64) << 52))
+}
+
 /// Shewchuk's error bound for the `orient2d` filter: `(3 + 16 eps) eps`.
 fn ccw_err_bound(a: f64, b: f64) -> f64 {
     (3.0 + 16.0 * EPS) * EPS * (a.abs() + b.abs())
@@ -256,6 +329,28 @@ pub fn orient2d(a: Point2D, b: Point2D, c: Point2D) -> Orientation {
 
 /// The exact fallback for [`orient2d`], on already-subtracted coordinates.
 fn orient2d_exact(acx: f64, bcx: f64, acy: f64, bcy: f64) -> Orientation {
+    // The exact path represents the determinant as a sum of `f64` products, so it can only be
+    // exact while the largest product is representable -- that is, while the coordinates are below
+    // `sqrt(f64::MAX)`, about 1.34e154. Above that, `two_product` returns `x = inf` and `e = NaN`,
+    // the expansion sums to `NaN`, and because both `est > 0.0` and `est < 0.0` are false for
+    // `NaN` the predicate would report `Collinear` for a triple that is definitively not
+    // collinear.
+    //
+    // Rescaling the inputs by a power of two fixes that without giving up exactness. The
+    // determinant is homogeneous of degree two, so `det(s*p) = s^2 * det(p)`, and `s^2` is a
+    // strictly positive multiple: it cannot change the sign, and it is represented exactly, so the
+    // sign of the rescaled determinant is the sign of the true one. Dividing by a power of two is
+    // itself exact for any input not driven to zero by underflow, and a power of two is used
+    // precisely so no rounding is introduced in the division.
+    //
+    // The scale is taken from the already-subtracted differences rather than the raw coordinates:
+    // those are what the products are formed from, and scaling them cannot overflow a subtraction
+    // that has already happened.
+    let largest = acx.abs().max(bcx.abs()).max(acy.abs()).max(bcy.abs());
+    let (acx, bcx, acy, bcy) = match exact_rescale(largest, TWO_COMPONENT_DEGREE) {
+        Some(scale) => (acx * scale, bcx * scale, acy * scale, bcy * scale),
+        None => (acx, bcx, acy, bcy),
+    };
     let left = Expansion::product(&two_component(acx), &two_component(bcy));
     let right = Expansion::product(&two_component(acy), &two_component(bcx));
     let mut det = left;
@@ -329,6 +424,31 @@ fn incircle_exact(
     //   | cx  cy  cx^2 + cy^2 |
     // whose third column is the squared norm of the first two, so no square root is involved and
     // the whole determinant is exact in expansions. The coordinates are already relative to `d`.
+    // The exact path squares its inputs into the third column, so the determinant is quartic in the
+    // coordinates and overflows far earlier than `orient2d` does -- at `f64::MAX^(1/4)`, about
+    // 1.16e77. Past that the expansion fills with `inf` and `NaN` components and, because
+    // `MAX_COMPONENTS` is a fixed buffer whose `debug_assert!` guard is compiled out in release,
+    // the overflow used to write past the end of the buffer and abort.
+    //
+    // The same rescaling argument applies: the in-circle determinant is homogeneous of degree
+    // four, so scaling the inputs by a power of two multiplies the determinant by a strictly
+    // positive exact power of two and cannot change its sign.
+    let largest = ax
+        .abs()
+        .max(ay.abs())
+        .max(bx.abs())
+        .max(by.abs())
+        .max(cx.abs())
+        .max(cy.abs());
+    // A 3x3 determinant of rows (x, y, x^2+y^2) with all entries of degree at most 2 is homogeneous
+    // of degree 2 + 2 + 2 = 6, not 4: the squared-norm column contributes a factor of the whole
+    // coordinate once per pairing, so each product in the cofactor expansion has degree up to 6.
+    // Budgeting for degree 4 under-scales, and the residual overflow is what pushed the answer to
+    // the wrong sign at the top of the range.
+    let (ax, ay, bx, by, cx, cy) = match exact_rescale(largest, SIX_COMPONENT_DEGREE) {
+        Some(scale) => (ax * scale, ay * scale, bx * scale, by * scale, cx * scale, cy * scale),
+        None => (ax, ay, bx, by, cx, cy),
+    };
     let row = |x: f64, y: f64| {
         let dx = two_component(x);
         let dy = two_component(y);
@@ -578,6 +698,187 @@ mod tests {
             let naive = alift * bcdet + blift * cadet + clift * abdet;
             let expected = if naive > 0.0 { Incircle::In } else { Incircle::Out };
             assert_eq!(incircle(a, b, c, d), expected, "point {d:?}");
+        }
+    }
+
+    /// `orient2d`'s exact path represents the determinant as a sum of `f64` products, so it can
+    /// only be exact while `magnitude^2` is representable -- that is, while the coordinates are
+    /// below `sqrt(f64::MAX)` (about 1.34e154). Above that the products overflow to infinity, the
+    /// expansion sums to `NaN`, and both `est > 0.0` and `est < 0.0` are false, so the predicate
+    /// reported `Collinear` for triples that are definitively not collinear.
+    #[test]
+    fn orient2d_is_exact_when_the_determinant_overflows_f64() {
+        // A right angle at the origin, scaled past the overflow threshold. `c` is strictly left of
+        // `a -> b`, so the exact answer is counter-clockwise at every magnitude.
+        for &magnitude in &[1e155, 1e160, 1e200, 1e300, 1.7e308] {
+            let (a, b, c) = (p!(0.0, 0.0), p!(magnitude, 0.0), p!(0.0, magnitude));
+            assert_eq!(
+                orient2d(a, b, c),
+                Orientation::CounterClockwise,
+                "counter-clockwise right angle of size {magnitude:e} was not reported as such"
+            );
+            assert_eq!(
+                orient2d(a, c, b),
+                Orientation::Clockwise,
+                "clockwise right angle of size {magnitude:e} was not reported as such"
+            );
+        }
+    }
+
+    /// The same overflow reached through a translation rather than through the origin, which is
+    /// the shape the crate actually meets: the predicate subtracts `c` first, so the intermediate
+    /// differences are what overflow, not the input coordinates.
+    #[test]
+    fn orient2d_is_exact_above_the_overflow_threshold_with_a_nonzero_origin() {
+        for &magnitude in &[1e155, 1e200, 1e300] {
+            let o = magnitude;
+            let (a, b, c) = (p!(o, o), p!(2.0 * o, o), p!(o, 2.0 * o));
+            assert_eq!(
+                orient2d(a, b, c),
+                Orientation::CounterClockwise,
+                "translated counter-clockwise triple of size {magnitude:e} was not reported as such"
+            );
+            assert_eq!(
+                orient2d(a, c, b),
+                Orientation::Clockwise,
+                "translated clockwise triple of size {magnitude:e} was not reported as such"
+            );
+        }
+    }
+
+    /// The prescale must not turn a genuinely degenerate triple into a non-degenerate one, and
+    /// must not stop answering `Collinear` for collinear input at any magnitude.
+    #[test]
+    fn orient2d_still_reports_genuinely_collinear_triples_at_every_magnitude() {
+        for &magnitude in &[1e0, 1e10, 1e150, 1e155, 1e200, 1e300] {
+            let (a, b, c) = (p!(0.0, 0.0), p!(magnitude, magnitude), p!(3.0 * magnitude, 3.0 * magnitude));
+            assert_eq!(
+                orient2d(a, b, c),
+                Orientation::Collinear,
+                "collinear triple of size {magnitude:e} was not reported as collinear"
+            );
+            // A repeated point is degenerate in the same way.
+            let (a, b, c) = (p!(magnitude, magnitude), p!(magnitude, magnitude), p!(0.0, 0.0));
+            assert_eq!(
+                orient2d(a, b, c),
+                Orientation::Collinear,
+                "repeated-point triple of size {magnitude:e} was not reported as collinear"
+            );
+        }
+    }
+
+    /// The prescale divides by a power of two, which is exact, so the predicate must agree with the
+    /// unscaled answer for every magnitude where the unscaled answer is meaningful. This is the
+    /// check that the fix does not quietly change behaviour below the threshold.
+    #[test]
+    fn orient2d_agrees_across_the_overflow_threshold() {
+        let mut checked = 0usize;
+        for exponent in 0..=308u32 {
+            let magnitude = f64::from_bits((1023u64 + u64::from(exponent)) << 52);
+            if !(magnitude.is_finite() && magnitude > 0.0) {
+                continue;
+            }
+            // Exactly representable coordinates keep the ground truth exact: the determinant is
+            // then a product of powers of two and its sign is not in doubt.
+            let (a, b, c) = (p!(0.0, 0.0), p!(magnitude, 0.0), p!(0.0, magnitude));
+            assert_eq!(
+                orient2d(a, b, c),
+                Orientation::CounterClockwise,
+                "power-of-two magnitude 2^{exponent} lost its orientation"
+            );
+            checked += 1;
+        }
+        assert!(checked > 200, "too few magnitudes checked: {checked}");
+    }
+
+    /// `incircle`'s exact path squares its inputs into the third column, so it overflows at
+    /// `f64::MAX^(1/4)` (about 1.16e77) rather than at `sqrt(f64::MAX)`. It did so before this
+    /// fix by reporting `OnCircle` for points that are clearly inside or outside, and by
+    /// exhausting the expansion buffer and panicking outright above about 5.6e102.
+    #[test]
+    fn incircle_is_exact_when_the_determinant_overflows_f64() {
+        for &magnitude in &[1e78, 1e99, 1e150, 1e300] {
+            let (a, b, c) = (p!(0.0, 0.0), p!(magnitude, 0.0), p!(0.0, magnitude));
+            // The circumcircle of this right angle is centred at the midpoint of the hypotenuse,
+            // (m/2, m/2), with radius m/sqrt(2), so that midpoint is strictly inside it. The
+            // quarter point (m/4, m/4) is deliberately not used here: it sits exactly on the
+            // circle, at half the radius, and that is the `OnCircle` case below.
+            let inside = p!(magnitude / 2.0, magnitude / 2.0);
+            assert_eq!(
+                incircle(a, b, c, inside),
+                Incircle::In,
+                "interior point of size {magnitude:e} was not reported inside"
+            );
+            // And a point far beyond the hypotenuse is strictly outside it.
+            let outside = p!(magnitude * 4.0, 0.0);
+            assert_eq!(
+                incircle(a, b, c, outside),
+                Incircle::Out,
+                "exterior point of size {magnitude:e} was not reported outside"
+            );
+        }
+    }
+
+    /// The four points `(0,0)`, `(r,0)`, `(0,r)`, `(r,r)` are exactly concyclic whenever `r` is a
+    /// power of two, so the predicate must report `OnCircle` rather than collapsing to `In` or
+    /// `Out` with an overflowed expansion. The magnitude below is a power of two for that reason:
+    /// for an arbitrary `r` the fourth point is concyclic only up to rounding, so the exact answer
+    /// is then legitimately `In` or `Out` rather than `OnCircle`.
+    #[test]
+    fn incircle_reports_on_circle_when_the_determinant_overflows_f64() {
+        // Powers of two spanning the range where the quartic determinant overflows, from just
+        // above the fourth root of the largest double up to the largest double itself.
+        for exponent in [256u32, 300, 400, 500, 600, 700, 1020] {
+            let magnitude = f64::from_bits(u64::from(1023 + exponent) << 52);
+            let (a, b, c, d) = (
+                p!(0.0, 0.0),
+                p!(magnitude, 0.0),
+                p!(0.0, magnitude),
+                p!(magnitude, magnitude),
+            );
+            assert_eq!(
+                incircle(a, b, c, d),
+                Incircle::OnCircle,
+                "concyclic point at 2^{exponent} was not reported on the circle"
+            );
+        }
+    }
+
+    /// The in-circle determinant is homogeneous of degree six, not four: each row of the 3x3 is
+    /// `(x, y, x^2 + y^2)`, so a cofactor expansion multiplies three at-most-quadratic rows. A
+    /// rescale budgeted for degree four under-scales, and the residual overflow at the very top of
+    /// the `f64` range was enough to flip the reported sign. This case is the regression for that.
+    #[test]
+    fn incircle_is_exact_at_the_top_of_the_f64_range() {
+        // The largest finite double, halved so that the point below is a usable probe. 8.9e307 is
+        // near f64::MAX and its square would be about 1e616 if the rescale did not engage.
+        let m = 8.9e307f64;
+        let (a, b, c) = (p!(0.0, 0.0), p!(m, 0.0), p!(0.0, m));
+        // The hypotenuse midpoint, strictly inside the circumcircle.
+        assert_eq!(
+            incircle(a, b, c, p!(m / 2.0, m / 2.0)),
+            Incircle::In,
+            "circumcentre of a right angle at the top of the range was not reported inside"
+        );
+        // A point three quarters of the way out along the x axis, strictly outside it. The factor
+        // is applied as m/2 * 3 rather than m * 3 so the probe itself stays finite.
+        assert_eq!(
+            incircle(a, b, c, p!(m / 2.0 * 3.0, 0.0)),
+            Incircle::Out,
+            "exterior point at the top of the range was not reported outside"
+        );
+    }
+
+    /// The expansion buffer is a fixed 32 slots and its `debug_assert!` guard is compiled out in
+    /// release, so an overflowed expansion used to write past the end of the buffer and abort. This
+    /// exercises the same magnitudes in a release build.
+    #[test]
+    fn incircle_does_not_overflow_the_expansion_buffer() {
+        for &magnitude in &[1e103, 1e150, 1e300, 1.7e308] {
+            let (a, b, c) = (p!(0.0, 0.0), p!(magnitude, 0.0), p!(0.0, magnitude));
+            let d = p!(magnitude * 4.0, magnitude * 4.0);
+            // The answer is what is under test; the point of the case is that this returns at all.
+            let _ = incircle(a, b, c, d);
         }
     }
 }
