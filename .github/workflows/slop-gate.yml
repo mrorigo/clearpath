@@ -43,12 +43,21 @@ jobs:
           printf '%s  %s\n' "$checksum" "$RUNNER_TEMP/$asset" | sha256sum --check
           tar -xzf "$RUNNER_TEMP/$asset" -C "$RUNNER_TEMP/slop-gate/bin"
           echo "$RUNNER_TEMP/slop-gate/bin" >> "$GITHUB_PATH"
+      - name: Resolve Slop Gate version
+        id: slop-gate-version
+        shell: bash
+        run: echo "version=$(slop-gate --version | awk '{print $NF}')" >> "$GITHUB_OUTPUT"
       - run: mkdir -p .slop-gate
       - run: slop-gate index --ref HEAD --output .slop-gate/index.json
       - uses: actions/cache/save@v4
         with:
           path: .slop-gate/index.json
-          key: slop-gate-index-${{ github.sha }}
+          # The tool version is part of the key on purpose. An index is an artifact of one
+          # slop-gate version: 0.5.0 cannot read a schema 4 index, and a cache entry is immutable
+          # and never expires, so a base commit indexed by an older release poisons every later
+          # pull request against it. `latest` is a floating ref, so the version has to be
+          # resolved before it can go in the key.
+          key: slop-gate-index-v${{ steps.slop-gate-version.outputs.version }}-${{ github.sha }}
 
   check-pr:
     if: github.event_name == 'pull_request'
@@ -78,13 +87,35 @@ jobs:
           printf '%s  %s\n' "$checksum" "$RUNNER_TEMP/$asset" | sha256sum --check
           tar -xzf "$RUNNER_TEMP/$asset" -C "$RUNNER_TEMP/slop-gate/bin"
           echo "$RUNNER_TEMP/slop-gate/bin" >> "$GITHUB_PATH"
+      - name: Resolve Slop Gate version
+        id: slop-gate-version
+        shell: bash
+        run: echo "version=$(slop-gate --version | awk '{print $NF}')" >> "$GITHUB_OUTPUT"
       - uses: actions/cache/restore@v4
         id: restore-index
         with:
           path: .slop-gate/index.json
-          key: slop-gate-index-${{ github.event.pull_request.base.sha }}
-      - if: steps.restore-index.outputs.cache-hit != 'true'
-        run: mkdir -p .slop-gate && slop-gate index --ref ${{ github.event.pull_request.base.sha }} --output .slop-gate/index.json
+          # See the note on the push job: the tool version must be in the key or a stale index is
+          # restored forever.
+          key: slop-gate-index-v${{ steps.slop-gate-version.outputs.version }}-${{ github.event.pull_request.base.sha }}
+      # An index is only usable if this version can read it, and a cache *miss* leaves no index at
+      # all, so one step has to cover both cases. An entry saved before the versioned key existed
+      # is still there under the old name and gets restored once; and after a cache eviction the
+      # next run has nothing to read. Either way the answer is the same: build the index unless
+      # there is already a usable one here. Rebuilding is cheap and correctness is not negotiable,
+      # so the test is "can the tool read it", not "did we hit the cache".
+      - name: Ensure a usable index exists
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ ! -f .slop-gate/index.json ] || ! slop-gate check \
+               --base "${{ github.event.pull_request.base.sha }}" \
+               --head HEAD --index .slop-gate/index.json --format sarif > slop-gate.sarif 2>/dev/null; then
+            echo "no usable index (cache miss, or one this slop-gate cannot read); building"
+            rm -f .slop-gate/index.json
+            mkdir -p .slop-gate
+            slop-gate index --ref "${{ github.event.pull_request.base.sha }}" --output .slop-gate/index.json
+          fi
       - run: slop-gate check --base ${{ github.event.pull_request.base.sha }} --head HEAD --index .slop-gate/index.json --format sarif > slop-gate.sarif
       - uses: github/codeql-action/upload-sarif@v3
         with:
