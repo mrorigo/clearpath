@@ -1,3 +1,5 @@
+<img src="docs/logo.png"/>
+
 # clearpath
 
 [![CI](https://github.com/mrorigo/clearpath/actions/workflows/ci.yml/badge.svg)](https://github.com/mrorigo/clearpath/actions/workflows/ci.yml)
