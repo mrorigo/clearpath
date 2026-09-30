@@ -18,6 +18,14 @@ All notable changes to this project are recorded here. The format follows
   place, so the test that certifies a route and the test that checks it cannot disagree.
 
 ## [0.1.0] — unreleased
+- `PathPlanner::route_orthogonal` no longer returns a route that crosses an obstacle. The route
+  was verified by sampling nine points per leg, so any blocked stretch narrower than an eighth of
+  a leg fell between two samples and the route was returned as clear. The verification is now
+  exact — each leg is tested against every obstacle edge. This is reachable whenever an obstacle
+  is not its own bounding box: the Hanan grid is built from bounding-box faces, so a slanted face
+  can cross a cell the grid certified on its centre alone.
+
+## [0.1.0]
 
 First release. Named `clearpath`; the crate was developed as `pathplan`, after Graphviz's
 `libpathplan`, and nothing was derived from it (see the README's "Origin and provenance").

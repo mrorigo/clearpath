@@ -65,6 +65,75 @@ fn open_space_is_an_l() {
     check(&req);
 }
 
+/// The router's verification used to sample each leg at nine points, so a blocked stretch
+/// narrower than an eighth of the leg fell between two samples and the route was returned
+/// straight through the obstacle. These are the inputs that produced it, found by fuzzing.
+#[test]
+fn a_route_never_crosses_a_non_rectangular_obstacle() {
+    // A triangle and a quadrilateral: neither is its own bounding box, so a face of each
+    // crosses the interior of a grid cell whose centre the router certifies as free.
+    let obstacles = vec![
+        Polygon::new(vec![
+            Point2D::new(62.2985272601378, 76.96932122183367),
+            Point2D::new(58.65098857647418, 80.12628183000274),
+            Point2D::new(57.04354354209111, 76.24987005449628),
+            Point2D::new(59.80890537115175, 71.66867667327912),
+        ])
+            .unwrap(),
+        Polygon::new(vec![
+            Point2D::new(37.939392606205324, 71.73262863860343),
+            Point2D::new(38.26792768762064, 80.92843389733514),
+            Point2D::new(31.673446815380757, 72.77132666893101),
+        ])
+        .unwrap(),
+    ];
+    for (a, b) in [
+        (
+            Point2D::new(78.32082755447614, 6.355276226875372),
+            Point2D::new(39.83035360063738, 76.9996360975841),
+        ),
+        (
+            Point2D::new(17.821504441688013, 33.06899301462444),
+            Point2D::new(78.21979712547615, 91.5848254339149),
+        ),
+    ] {
+        let req = request(obstacles.clone(), a, b, 0.0);
+        let mut planner = PathPlanner::new();
+        let Ok(poly) = planner.route_orthogonal(&req) else {
+            continue;
+        };
+        // The contract: every returned route is in the free space. `check` samples, so this
+        // asserts the property directly against the exact predicate for each leg.
+        let clearance = req.clearance();
+        for w in poly.points.windows(2) {
+            assert!(
+                clearance.hull_is_free(w),
+                "leg {:?}..{:?} is not free, in route {poly:?}",
+                w[0],
+                w[1]
+            );
+        }
+        check(&req);
+    }
+}
+
+/// The same defect, reduced to a shape a reader can check by eye: a thin sliver of an
+/// obstacle that pokes into a cell the grid certified on its centre.
+#[test]
+fn a_thin_protrusion_between_samples_is_still_refused() {
+    // A narrow triangle whose apex is the only part inside the bounding box, so the grid
+    // places no line at the apex and no sample of the long leg lands on it.
+    let tri = Polygon::new(vec![p(49.0, 49.0), p(51.0, 49.0), p(50.0, 51.0)]).unwrap();
+    let req = request(vec![tri], p(20.0, 20.0), p(80.0, 80.0), 0.0);
+    let mut planner = PathPlanner::new();
+    if let Ok(poly) = planner.route_orthogonal(&req) {
+        let clearance = req.clearance();
+        for w in poly.points.windows(2) {
+            assert!(clearance.hull_is_free(w), "leg {:?}..{:?} is not free", w[0], w[1]);
+        }
+    }
+}
+
 #[test]
 fn around_a_box() {
     let obstacles = vec![box_poly([40.0, 40.0, 60.0, 60.0])];
