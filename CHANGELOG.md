@@ -6,6 +6,17 @@ All notable changes to this project are recorded here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- `PathPlanner::route_smooth` no longer returns a curve that passes through an obstacle. A taut
+  path runs along obstacle faces, and reconstructing a control point as `knot + t/3` lands a
+  fraction of an ulp inside the face. `Clearance::is_free` accepted any point with a non-zero
+  distance to the obstacle's ring, so such a point was reported free and the curve was shipped
+  through the obstacle. The interior test now requires a point to be more than the boundary
+  tolerance inside, which is the same tolerance the rest of the clearance tests use.
+- `Clearance::is_free` and `Clearance::hull_is_free` derive their boundary tolerance from one
+  place, so the test that certifies a route and the test that checks it cannot disagree.
+
 ## [0.1.0] — unreleased
 
 First release. Named `clearpath`; the crate was developed as `pathplan`, after Graphviz's

@@ -72,6 +72,17 @@ impl<'a> Clearance<'a> {
         q.distance(p) >= self.margin - slack
     }
 
+    /// The slack the obstacle-distance tests use: a length, not a count of ulps.
+    /// `is_free` and `hull_is_free` must agree at the boundary. A taut path's knots lie exactly on
+    /// obstacle faces, and a knot is later reconstructed as `a + t/3`, which can land a fraction of
+    /// an ulp to either side of the face. Without a shared tolerance the two disagree by that
+    /// fraction: `hull_is_free` certified a hull that `is_free` then reported as inside the
+    /// obstacle, and the router returned a curve that a point test contradicts.
+    fn distance_slack(&self) -> f64 {
+        1e-9 * self.workspace.width().abs().max(self.workspace.height().abs()).max(1.0)
+    }
+
+
     /// Whether `p` is in the free space.
     ///
     /// A distance test, not a containment test: at `margin == 0` a taut path's knots lie exactly on
@@ -81,7 +92,7 @@ impl<'a> Clearance<'a> {
         // curve sampled at a knot that lies exactly on the eroded boundary can evaluate a fraction
         // of an ulp outside it, and reporting that as a collision is a rounding artefact dressed up
         // as a geometric fact.
-        let slack = 1e-9 * self.workspace.width().abs().max(self.workspace.height().abs()).max(1.0);
+        let slack = self.distance_slack();
         let ws = self.workspace;
         if p.x < ws.min.x - slack
             || p.x > ws.max.x + slack
@@ -94,7 +105,7 @@ impl<'a> Clearance<'a> {
         // an outset geometry: the obstacles here are the caller's originals, and eroding the
         // workspace alone would leave them un-grown. A small relative slack absorbs the rounding in
         // `distance_to_ring` at exactly `margin`.
-        let slack = 1e-9 * self.margin.abs().max(1.0);
+        let slack = self.distance_slack();
         for o in self.obstacles {
             // A point further than `margin` from an obstacle's bounding box is further than
             // `margin` from the obstacle, so the per-edge loop below can be skipped. On a route
@@ -112,7 +123,7 @@ impl<'a> Clearance<'a> {
             // `Polygon::contains` reports the boundary as inside, and at `margin == 0` a taut path's
             // knots lie exactly on boundaries. So the interior test has to be "strictly inside",
             // which is `contains` *and* a positive distance.
-            if (o.contains(p) && d > 0.0) || d < self.margin - slack {
+            if (o.contains(p) && d > slack) || d < self.margin - slack {
                 return false;
             }
         }
@@ -183,7 +194,7 @@ impl<'a> Clearance<'a> {
                 // For a segment that does not cross an obstacle edge, the closest approach to that
                 // edge is attained at one of its endpoints, so testing every obstacle *vertex*
                 // against the segment is sufficient.
-                let slack = 1e-9 * self.margin.abs().max(1.0);
+                let slack = self.distance_slack();
                 for v in ring {
                     if !self.point_near_segment(*v, c, d, slack) {
                         return false;
