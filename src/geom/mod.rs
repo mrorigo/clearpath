@@ -70,7 +70,22 @@ pub fn segment_within_band(
     if u > v {
         return false;
     }
-    let slope = if b.x == a.x { 0.0 } else { (b.y - a.y) / (b.x - a.x) };
+    // A vertical segment is not a function of `x`, so it has no slope-intercept form. Representing
+    // it as one at slope 0 substitutes the *horizontal* line `y = a.y` for it, which silently
+    // discards `b.y` and reduces the test to the single ordinate of `a` -- so a segment that
+    // leaves the band at its far end is accepted. Its abscissa range is the single value `a.x`,
+    // and the band over that abscissa is a closed ordinate interval, so both endpoints are tested
+    // against both bounds there.
+    if b.x == a.x {
+        // A vertical segment over a single abscissa reduces to its ordinate range, so it is inside
+        // the band exactly when the low end is at or above the lower bound and the high end is at
+        // or below the upper bound. Both comparisons reuse `above` at a degenerate interval
+        // [a.x, a.x], which keeps the boundary-tie tolerance identical to the sloped path.
+        let (lo, hi) = (a.y.min(b.y), a.y.max(b.y));
+        return above((0.0, lo), lower, a.x, a.x)
+            && above(upper, (0.0, hi), a.x, a.x);
+    }
+    let slope = (b.y - a.y) / (b.x - a.x);
     let segment = (slope, a.y - slope * a.x);
     above(segment, lower, u, v) && above(upper, segment, u, v)
 }
@@ -189,6 +204,66 @@ mod band_tests {
             5.0,
             5.0
         ));
+    }
+
+    /// A vertical segment is not a function of `x`, and its abscissa range is the single value
+    /// `a.x`. Writing it as a slope-intercept pair at slope 0 therefore substitutes the *horizontal*
+    /// line `y = a.y` for it and discards `b.y` altogether, so the test comes down to the one
+    /// ordinate of `a` and a segment that leaves the band at its far end is accepted. The
+    /// ordinate range of the segment is the whole segment, so a vertical knot is inside the band
+    /// at `a.x` only when *both* ends are inside it, whichever end is which.
+    ///
+    /// All of the negative cases live in one function on purpose. The broken code reads a single
+    /// ordinate, so a lone case is satisfied by whatever that one ordinate happens to be, and a
+    /// second case with a different one could pass in a way that says nothing about the first. Held
+    /// together they cannot: each one puts the violation at a different end and in a different
+    /// direction, so no choice of a single ordinate clears them all. The last group needs the
+    /// bounds themselves to be sloped, because a horizontal bound has the same value everywhere,
+    /// and so cannot tell a bound read at the segment's own abscissa from one read at zero, which
+    /// is the mistake that survives when the ordinate range is fixed but the abscissa is not.
+    #[test]
+    fn a_vertical_segment_is_rejected_when_either_end_leaves_the_band() {
+        let flat_lower = line(0.0, 3.0);
+        let flat_upper = line(0.0, 9.0);
+        let inside = Point2D::new(5.0, 4.0);
+        let high = Point2D::new(5.0, 20.0);
+        // Out through the upper bound, and the same segment with its ends swapped: `a..b` and
+        // `b..a` are one segment, so neither order may be accepted.
+        assert!(!segment_within_band(inside, high, flat_lower, flat_upper, 5.0, 5.0));
+        assert!(!segment_within_band(high, inside, flat_lower, flat_upper, 5.0, 5.0));
+        // Down through the lower bound, from an ordinate that is inside the band, so the far end
+        // is the only one that can betray it.
+        let top = Point2D::new(5.0, 8.0);
+        let deep = Point2D::new(5.0, -50.0);
+        assert!(!segment_within_band(top, deep, flat_lower, flat_upper, 5.0, 5.0));
+        // Wholly below the band, with no endpoint near it. A band checked at the wrong abscissa is
+        // still a band, so this is what catches a bound read at the wrong place.
+        let far = Point2D::new(5.0, -100.0);
+        assert!(!segment_within_band(far, deep, flat_lower, flat_upper, 5.0, 5.0));
+        // A sloped band at the same abscissa: y = x below and y = 2x + 5 above, so at x = 5 the
+        // band is y in [5, 15].
+        let sloped_lower = line(1.0, 0.0);
+        let sloped_upper = line(2.0, 5.0);
+        let in_band = Point2D::new(5.0, 6.0);
+        let under = Point2D::new(5.0, 4.0);
+        let over = Point2D::new(5.0, 16.0);
+        let within = Point2D::new(5.0, 14.0);
+        assert!(segment_within_band(in_band, within, sloped_lower, sloped_upper, 5.0, 5.0));
+        assert!(!segment_within_band(in_band, over, sloped_lower, sloped_upper, 5.0, 5.0));
+        assert!(!segment_within_band(in_band, under, sloped_lower, sloped_upper, 5.0, 5.0));
+    }
+
+    /// The positive control for the test above: a vertical segment whose both ends are inside the
+    /// band is inside it, so widening the test to the whole ordinate range does not start
+    /// rejecting the legitimate vertical knots the decomposition produces. Without it, a fix that
+    /// rejected every vertical segment would satisfy every negative case.
+    #[test]
+    fn a_vertical_segment_fully_inside_the_band_is_accepted() {
+        let lower = line(0.0, 3.0);
+        let upper = line(0.0, 9.0);
+        let a = Point2D::new(5.0, 4.0);
+        let b = Point2D::new(5.0, 8.0);
+        assert!(segment_within_band(a, b, lower, upper, 5.0, 5.0));
     }
 
     #[test]
