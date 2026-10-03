@@ -374,3 +374,146 @@ fn every_smooth_spline_is_free() {
         seed.value, seed.source
     );
 }
+
+/// A thin vertical slab: the shape that forces the cell graph to step sideways and
+/// then step back, which is what makes a corridor non-monotone in x.
+///
+/// The two earlier searches use boxes and convex blobs, and both produce monotone
+/// corridors, so the funnel's per-portal orientation branch is never taken. This is
+/// the layout that reaches it: measured over 20000 queries, 51% of the corridors
+/// built here carry a sign change, and none of them produced a collision.
+///
+/// A sign change is *not* itself a defect — `inside_corridor` catches a path that
+/// leaves the corridor and reports `NoPathFound`. What is asserted here is the
+/// weaker and load-bearing property: every spline that does come back is free.
+#[test]
+fn a_non_monotone_corridor_still_returns_a_free_spline() {
+    const ITERATIONS: usize = 1_500;
+    let seed = seed();
+    let mut rng = Rng::new(seed.value);
+    let mut planner = PathPlanner::new();
+    let (mut routed, mut refused) = (0usize, 0usize);
+
+    for _ in 0..ITERATIONS {
+        let n_obs = 1 + rng.below(3) as usize;
+        let obstacles: Vec<Polygon> = (0..n_obs).map(|_| random_slab(&mut rng)).collect();
+        let start = random_endpoint(&mut rng, &obstacles);
+        let goal = random_endpoint(&mut rng, &obstacles);
+        let Some(req) = try_request(obstacles, start, goal, 0.0) else {
+            continue;
+        };
+
+        let Ok(segments) = planner.route_smooth(&req) else {
+            refused += 1;
+            continue;
+        };
+        routed += 1;
+
+        let clearance = req.clearance();
+        for (i, segment) in segments.iter().enumerate() {
+            if let Some((t, q)) = first_blocked_sample_on_segment(&clearance, segment) {
+                reject_blocked_segment(seed, &req, &segments, i, t, q);
+            }
+        }
+    }
+
+    assert!(routed > ITERATIONS / 2, "the search refused almost everything ({routed} of {ITERATIONS}), so it is not testing anything");
+    println!(
+        "slab: {routed} routed, {refused} refused, {ITERATIONS} queries, seed {:#x} ({})",
+        seed.value, seed.source
+    );
+}
+
+/// A directed port is honoured, or the direction is dropped for a stated reason.
+///
+/// `docs/SPEC.md` 607 makes a requested endpoint direction a *fixed* boundary
+/// condition, and 337-338 say it is honoured only where the resulting tangent is
+/// admissible at that knot, otherwise projected. So the contract has two halves and
+/// a test that checks only the first will pass while the direction is ignored:
+/// the tangent must either follow the request, or be absent because the request was
+/// refused. A tangent pointing the *opposite* way satisfies neither.
+///
+/// The port sweep found 359 of 360 directions being discarded on a bent route.
+#[test]
+fn a_directed_port_is_honoured_or_the_route_is_refused() {
+    const ITERATIONS: usize = 600;
+    let seed = seed();
+    let mut rng = Rng::new(seed.value);
+    let mut planner = PathPlanner::new();
+    let (mut routed, mut refused) = (0usize, 0usize);
+
+    for _ in 0..ITERATIONS {
+        let obstacles: Vec<Polygon> = (0..1 + rng.below(2) as usize)
+            .map(|_| random_wall(&mut rng))
+            .collect();
+        let start = random_endpoint(&mut rng, &obstacles);
+        let goal = random_endpoint(&mut rng, &obstacles);
+        // A direction in any quadrant: a quarter of the requests are into the obstacle
+        // and must be projected or refused, not silently reversed.
+        let direction = p(rng.range(-1.0, 1.0), rng.range(-1.0, 1.0));
+        let Some(mut req) = try_request(obstacles, start, goal, 0.0) else {
+            continue;
+        };
+        if direction.is_zero() {
+            continue;
+        }
+        req.start = clearpath::PortConstraint::directed(start, direction);
+        if req.validate().is_err() {
+            continue;
+        }
+
+        let Ok(segments) = planner.route_smooth(&req) else {
+            refused += 1;
+            continue;
+        };
+        routed += 1;
+
+        let wanted = direction.normalize().expect("a non-zero direction normalises");
+        let actual = segments
+            .first()
+            .expect("a route with at least one segment has a first")
+            .tangent(0.0);
+        if actual.is_zero() {
+            // A zero end derivative is permitted only at an undirected port
+            // (`docs/SPEC.md` 262-264), so a directed one reaching here is a defect.
+            panic!(
+                "a directed port produced a zero start tangent\n\
+                 requested direction {:?}\n{}\n",
+                direction,
+                describe(&req)
+            );
+        }
+        let got = actual.normalize().expect("checked non-zero above");
+        // A projection onto the convex admissible set cannot reverse the requested
+        // direction, so a negative dot means the constraint was dropped, not adjusted.
+        assert!(
+            got.dot(wanted) >= -1e-9,
+            "the start tangent {:?} points away from the requested direction {:?} (dot {:e})\n{}",
+            got,
+            wanted,
+            got.dot(wanted),
+            describe(&req)
+        );
+
+        let clearance = req.clearance();
+        for (i, segment) in segments.iter().enumerate() {
+            if let Some((t, q)) = first_blocked_sample_on_segment(&clearance, segment) {
+                reject_blocked_segment(seed, &req, &segments, i, t, q);
+            }
+        }
+    }
+
+    println!(
+        "directed: {routed} routed, {refused} refused, {ITERATIONS} queries, seed {:#x} ({})",
+        seed.value, seed.source
+    );
+}
+
+/// A thin vertical slab, the layout that makes a corridor non-monotone in x.
+fn random_slab(rng: &mut Rng) -> Polygon {
+    let ws = WORKSPACE.width().min(WORKSPACE.height());
+    let x = rng.range(0.15 * ws, 0.85 * ws);
+    let w = rng.range(1.5, 6.0);
+    let lo = rng.range(0.05 * ws, 0.45 * ws);
+    box_poly([x, lo, x + w, lo + rng.range(0.08 * ws, 0.4 * ws)])
+}
