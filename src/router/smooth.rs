@@ -47,7 +47,11 @@ pub fn route_smooth(
 
     // Stage 4: the tangents, then the repair.
     let seeds = seed_tangents(&path.knots, &req.start, &req.goal);
-    let mut tangents = solve_tangents(&seeds, req.config.tangent_bias);
+    // A port that forced a direction has that tangent *fixed* (section 6.5), so the solver treats it
+    // as a boundary condition rather than as an unknown. Handing the direction over only as a seed
+    // makes it a bias the curvature term outvotes wherever the route bends.
+    let pinned = pinned_endpoints(&path.knots, &req.start, &req.goal);
+    let mut tangents = solve_tangents(&seeds, req.config.tangent_bias, &pinned);
     clamp_and_repair(
         &admissible,
         &path.knots,
@@ -55,9 +59,33 @@ pub fn route_smooth(
         &clearance,
         req.config.max_repair_iters,
         req.config.repair_dampening,
+        &pinned,
     );
 
     admissible.control_points(&path.knots, &tangents, &clearance)
+}
+
+/// Which tangents the solver must leave alone: an end whose port forced a direction.
+///
+/// Only the two ends can be pinned, because only a port carries a direction. A single-knot path
+/// has no tangents to pin, and a two-knot path pins at most one of them, since `start` and `goal`
+/// address different ends of a path with two knots.
+fn pinned_endpoints(
+    knots: &[Point2D],
+    start: &crate::router::PortConstraint,
+    goal: &crate::router::PortConstraint,
+) -> Vec<bool> {
+    let n = knots.len();
+    let mut pinned = alloc::vec![false; n];
+    if n >= 2 {
+        if start.direction.is_some() {
+            pinned[0] = true;
+        }
+        if goal.direction.is_some() {
+            pinned[n - 1] = true;
+        }
+    }
+    pinned
 }
 
 /// The unconstrained tangents: a third of the local chord, or a port's direction at that scale.
