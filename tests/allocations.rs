@@ -179,16 +179,16 @@ fn per_stage_allocation_breakdown() {
             })
             .collect();
         let Counted(solve, _) = Counted::measure(|| {
-            let t = solve_tangents(&seeds, 0.0);
+            let t = solve_tangents(&seeds, 0.0, &[]);
             std::hint::black_box(&t);
         });
         let Counted(repair, _) = Counted::measure(|| {
-            let mut t = solve_tangents(&seeds, 0.0);
-            clamp_and_repair(&adm, &path.knots, &mut t, &clearance, 16, 0.5);
+            let mut t = solve_tangents(&seeds, 0.0, &[]);
+            clamp_and_repair(&adm, &path.knots, &mut t, &clearance, 16, 0.5, &[]);
             std::hint::black_box(&t);
         });
-        let mut t = solve_tangents(&seeds, 0.0);
-        clamp_and_repair(&adm, &path.knots, &mut t, &clearance, 16, 0.5);
+        let mut t = solve_tangents(&seeds, 0.0, &[]);
+        clamp_and_repair(&adm, &path.knots, &mut t, &clearance, 16, 0.5, &[]);
         let Counted(final_check, _) = Counted::measure(|| {
             let s = adm.control_points(&path.knots, &t, &clearance).unwrap();
             std::hint::black_box(&s);

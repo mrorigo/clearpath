@@ -41,14 +41,20 @@ pub fn clamp_and_repair(
     clearance: &Clearance,
     max_iters: u32,
     dampening: f64,
+    pinned: &[bool],
 ) -> bool {
     project_all(admissible, tangents);
     if admissible.first_obstructed(knots, tangents, clearance).is_none() {
         return true;
     }
-    // Damp once: for an overshoot of a few percent this is enough and it keeps the shape.
-    for t in tangents.iter_mut() {
-        *t = *t * dampening;
+    // Damp once: for an overshoot of a few percent this is enough and it keeps the shape. A pinned
+    // tangent is a boundary condition rather than a fitted value, so it keeps its direction: the
+    // magnitude is re-derived from the knot spacing by `project`, and damping it would silently
+    // change the direction the caller asked for.
+    for (i, t) in tangents.iter_mut().enumerate() {
+        if !pinned.get(i).copied().unwrap_or(false) {
+            *t = *t * dampening;
+        }
     }
     project_all(admissible, tangents);
     if admissible.first_obstructed(knots, tangents, clearance).is_none() {
@@ -63,13 +69,25 @@ pub fn clamp_and_repair(
         let Some(bad) = admissible.first_obstructed_from(knots, tangents, clearance, resume) else {
             return true;
         };
-        tangents[bad] = Point2D::ZERO;
-        tangents[bad + 1] = Point2D::ZERO;
+        for k in [bad, bad + 1] {
+            tangents[k] = if pinned.get(k).copied().unwrap_or(false) {
+                match admissible.get(k) {
+                    Some(set) => set.project(tangents[k]),
+                    // No admissible set at this knot means the tangents are already unconstrained
+                    // here, so the requested direction stands.
+                    None => tangents[k],
+                }
+            } else {
+                Point2D::ZERO
+            };
+        }
         project_all(admissible, tangents);
         resume = bad.saturating_sub(1);
     }
-    for t in tangents.iter_mut() {
-        *t = Point2D::ZERO;
+    for (i, t) in tangents.iter_mut().enumerate() {
+        if !pinned.get(i).copied().unwrap_or(false) {
+            *t = Point2D::ZERO;
+        }
     }
     admissible.first_obstructed(knots, tangents, clearance).is_none()
 }

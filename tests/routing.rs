@@ -276,6 +276,35 @@ fn a_port_direction_is_honoured_when_it_fits() {
 }
 
 #[test]
+fn a_port_direction_is_honoured_around_a_bend() {
+    // The existing port test routes in open space, where the straight line from start to goal
+    // already leaves along the requested direction, so the curvature term and the requested
+    // direction agree and the test cannot tell them apart. Here a wall spans the direct line, so the
+    // corridor turns 90 degrees and the curvature-preferred entry is straight ahead -- perpendicular
+    // to the direction actually requested.
+    //
+    // The direction has to be admissible at the knot: asking to leave *away* from the goal is not,
+    // and `docs/SPEC.md` 337 then says the route takes the projection instead, so that case belongs
+    // to the projection test below rather than here.
+    let obstacles = vec![box_poly([45.0, 0.0, 55.0, 50.0])];
+    let mut req = request(obstacles, p(10.0, 50.0), p(90.0, 50.0), 0.0);
+    req.start = PortConstraint::directed(p(10.0, 50.0), p(0.0, 1.0));
+    let segments = PathPlanner::new().route_smooth(&req).unwrap();
+    assert!(!segments.is_empty(), "a bent route should still be found");
+
+    let actual = segments.first().unwrap().tangent(0.0);
+    let requested = p(0.0, 1.0);
+    let got = actual
+        .normalize()
+        .unwrap_or_else(|| panic!("the start tangent is the zero vector: {actual:?}"));
+    assert!(
+        got.distance(requested) < 1e-6,
+        "start tangent {got:?} does not follow the requested direction {requested:?} \
+         (raw tangent {actual:?})"
+    );
+    check(&req);
+}
+#[test]
 fn a_port_direction_that_cannot_fit_is_projected_not_refused() {
     // Leaving a knot wedged in a corner: the direction is dropped and the route still comes out.
     let obstacles = vec![box_poly([40.0, 40.0, 60.0, 60.0])];

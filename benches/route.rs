@@ -104,13 +104,13 @@ fn bench_stages(c: &mut Criterion) {
             b.iter(|| string_pull(&decomp, &corridor, req.start.point, req.goal.point).unwrap())
         });
         group.bench_function(format!("solve_{label}"), |b| {
-            b.iter(|| solve_tangents(&seeds, req.config.tangent_bias))
+            b.iter(|| solve_tangents(&seeds, req.config.tangent_bias, &[]))
         });
         group.bench_function(format!("repair_{label}"), |b| {
-            let t = solve_tangents(&seeds, req.config.tangent_bias);
+            let t = solve_tangents(&seeds, req.config.tangent_bias, &[]);
             b.iter(|| {
                 let mut t = t.clone();
-                clamp_and_repair(&admissible, &path.knots, &mut t, &clearance, 16, 0.5)
+                clamp_and_repair(&admissible, &path.knots, &mut t, &clearance, 16, 0.5, &[])
             });
         });
     }
