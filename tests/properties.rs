@@ -24,6 +24,7 @@ const LEG_SAMPLES: usize = 64;
 const SEGMENT_SAMPLES: usize = 64;
 
 /// A seed, and where it came from, so a failure can be replayed.
+#[derive(Clone, Copy)]
 struct Seed {
     value: u64,
     source: &'static str,
@@ -279,6 +280,16 @@ fn reject_blocked_segment(
     )
 }
 
+/// Assert that every returned spline segment stays in the free space, with a replayable failure.
+fn assert_segments_are_free(seed: Seed, req: &RouteRequest, segments: &[CubicBezierSegment]) {
+    let clearance = req.clearance();
+    for (i, segment) in segments.iter().enumerate() {
+        if let Some((t, q)) = first_blocked_sample_on_segment(&clearance, segment) {
+            reject_blocked_segment(seed, req, segments, i, t, q);
+        }
+    }
+}
+
 /// Every returned rectilinear route is entirely in the free space.
 ///
 /// Ported from `probes/fuzz_router.rs`. Half the queries carry a margin, because a margin is
@@ -361,12 +372,7 @@ fn every_smooth_spline_is_free() {
         };
         routed += 1;
 
-        let clearance = req.clearance();
-        for (i, segment) in segments.iter().enumerate() {
-            if let Some((t, q)) = first_blocked_sample_on_segment(&clearance, segment) {
-                reject_blocked_segment(seed, &req, &segments, i, t, q);
-            }
-        }
+        assert_segments_are_free(seed, &req, &segments);
     }
 
     println!(
@@ -409,12 +415,7 @@ fn a_non_monotone_corridor_still_returns_a_free_spline() {
         };
         routed += 1;
 
-        let clearance = req.clearance();
-        for (i, segment) in segments.iter().enumerate() {
-            if let Some((t, q)) = first_blocked_sample_on_segment(&clearance, segment) {
-                reject_blocked_segment(seed, &req, &segments, i, t, q);
-            }
-        }
+        assert_segments_are_free(seed, &req, &segments);
     }
 
     assert!(routed > ITERATIONS / 2, "the search refused almost everything ({routed} of {ITERATIONS}), so it is not testing anything");
@@ -495,12 +496,7 @@ fn a_directed_port_is_honoured_or_the_route_is_refused() {
             describe(&req)
         );
 
-        let clearance = req.clearance();
-        for (i, segment) in segments.iter().enumerate() {
-            if let Some((t, q)) = first_blocked_sample_on_segment(&clearance, segment) {
-                reject_blocked_segment(seed, &req, &segments, i, t, q);
-            }
-        }
+        assert_segments_are_free(seed, &req, &segments);
     }
 
     assert!(
