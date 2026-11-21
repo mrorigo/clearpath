@@ -124,7 +124,7 @@ pub fn string_pull(
         portals.push((p.top(), p.bottom()));
     }
 
-    let mut path: Vec<Point2D> = Vec::new();
+    let mut path: Vec<Point2D> = vec![start];
     // `apex` is the last committed knot; `left`/`right` are the funnel's current sides, and the
     // `*_index` values are where in the portal list each side came from, so the scan can be
     // restarted at the apex. The sides are scalars rather than a stack of points: the funnel
@@ -190,7 +190,6 @@ pub fn string_pull(
     // The funnel emits only the *committed corners*; the start and goal are prepended and appended
     // here. Omitting the start is a silent bug that looks like a path that begins at a corner.
     path.push(goal);
-    path.insert(0, start);
     let path = drop_redundant_knots(path)?;
 
     // Safety net. The funnel is proven for a sleeve whose portals are ordered along the path, and

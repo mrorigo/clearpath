@@ -80,7 +80,10 @@ pub fn route_orthogonal(
     // Trim collinear runs, which the corner walk can leave behind at a repeated direction.
     polyline.points = simplify(core::mem::take(&mut polyline.points));
     if polyline.points.first() != Some(&start) {
-        polyline.points.insert(0, start);
+        let mut points = Vec::with_capacity(polyline.points.len() + 1);
+        points.push(start);
+        points.append(&mut polyline.points);
+        polyline.points = points;
     }
     if polyline.points.last() != Some(&goal) {
         polyline.points.push(goal);
