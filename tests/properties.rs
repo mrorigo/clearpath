@@ -290,6 +290,46 @@ fn assert_segments_are_free(seed: Seed, req: &RouteRequest, segments: &[CubicBez
     }
 }
 
+/// Generate smooth-route queries with the supplied obstacle shape and assert every returned curve is free.
+fn check_smooth_routes_are_free(
+    iterations: usize,
+    label: &str,
+    minimum_routed: Option<usize>,
+    mut obstacles_for_query: impl FnMut(&mut Rng) -> Vec<Polygon>,
+) {
+    let seed = seed();
+    let mut rng = Rng::new(seed.value);
+    let mut planner = PathPlanner::new();
+    let (mut routed, mut refused) = (0usize, 0usize);
+
+    for _ in 0..iterations {
+        let obstacles = obstacles_for_query(&mut rng);
+        let start = random_endpoint(&mut rng, &obstacles);
+        let goal = random_endpoint(&mut rng, &obstacles);
+        let Some(req) = try_request(obstacles, start, goal, 0.0) else {
+            continue;
+        };
+
+        let Ok(segments) = planner.route_smooth(&req) else {
+            refused += 1;
+            continue;
+        };
+        routed += 1;
+        assert_segments_are_free(seed, &req, &segments);
+    }
+
+    if let Some(minimum) = minimum_routed {
+        assert!(
+            routed > minimum,
+            "{label} search routed too few requests ({routed} of {iterations})"
+        );
+    }
+    println!(
+        "{label}: {routed} routed, {refused} refused, {iterations} queries, seed {:#x} ({})",
+        seed.value, seed.source
+    );
+}
+
 /// Every returned rectilinear route is entirely in the free space.
 ///
 /// Ported from `probes/fuzz_router.rs`. Half the queries carry a margin, because a margin is
@@ -350,35 +390,10 @@ fn every_orthogonal_route_is_free() {
 /// router bugs.
 #[test]
 fn every_smooth_spline_is_free() {
-    const ITERATIONS: usize = 2_000;
-    let seed = seed();
-    let mut rng = Rng::new(seed.value);
-    let mut planner = PathPlanner::new();
-    let (mut routed, mut refused) = (0usize, 0usize);
-
-    for _ in 0..ITERATIONS {
-        // 1..=3 vertical walls.
+    check_smooth_routes_are_free(2_000, "smooth", None, |rng| {
         let n_obs = 1 + rng.below(3) as usize;
-        let obstacles: Vec<Polygon> = (0..n_obs).map(|_| random_wall(&mut rng)).collect();
-        let start = random_endpoint(&mut rng, &obstacles);
-        let goal = random_endpoint(&mut rng, &obstacles);
-        let Some(req) = try_request(obstacles, start, goal, 0.0) else {
-            continue;
-        };
-
-        let Ok(segments) = planner.route_smooth(&req) else {
-            refused += 1;
-            continue;
-        };
-        routed += 1;
-
-        assert_segments_are_free(seed, &req, &segments);
-    }
-
-    println!(
-        "smooth: {routed} routed, {refused} refused, {ITERATIONS} queries, seed {:#x} ({})",
-        seed.value, seed.source
-    );
+        (0..n_obs).map(|_| random_wall(rng)).collect()
+    });
 }
 
 /// A thin vertical slab: the shape that forces the cell graph to step sideways and
@@ -394,35 +409,10 @@ fn every_smooth_spline_is_free() {
 /// weaker and load-bearing property: every spline that does come back is free.
 #[test]
 fn a_non_monotone_corridor_still_returns_a_free_spline() {
-    const ITERATIONS: usize = 1_500;
-    let seed = seed();
-    let mut rng = Rng::new(seed.value);
-    let mut planner = PathPlanner::new();
-    let (mut routed, mut refused) = (0usize, 0usize);
-
-    for _ in 0..ITERATIONS {
+    check_smooth_routes_are_free(1_500, "slab", Some(750), |rng| {
         let n_obs = 1 + rng.below(3) as usize;
-        let obstacles: Vec<Polygon> = (0..n_obs).map(|_| random_slab(&mut rng)).collect();
-        let start = random_endpoint(&mut rng, &obstacles);
-        let goal = random_endpoint(&mut rng, &obstacles);
-        let Some(req) = try_request(obstacles, start, goal, 0.0) else {
-            continue;
-        };
-
-        let Ok(segments) = planner.route_smooth(&req) else {
-            refused += 1;
-            continue;
-        };
-        routed += 1;
-
-        assert_segments_are_free(seed, &req, &segments);
-    }
-
-    assert!(routed > ITERATIONS / 2, "the search refused almost everything ({routed} of {ITERATIONS}), so it is not testing anything");
-    println!(
-        "slab: {routed} routed, {refused} refused, {ITERATIONS} queries, seed {:#x} ({})",
-        seed.value, seed.source
-    );
+        (0..n_obs).map(|_| random_slab(rng)).collect()
+    });
 }
 
 /// A directed port is honoured, or the direction is dropped for a stated reason.
