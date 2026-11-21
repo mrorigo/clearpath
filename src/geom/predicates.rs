@@ -150,9 +150,9 @@ impl Expansion {
     /// The exact product of the two expansions.
     fn product(a: &Expansion, b: &Expansion) -> Expansion {
         let mut out = Expansion::zero();
-        for i in 0..a.len {
-            for j in 0..b.len {
-                let (p, e) = two_product(a.buf[i], b.buf[j]);
+        for &a_component in &a.buf[..a.len] {
+            for &b_component in &b.buf[..b.len] {
+                let (p, e) = two_product(a_component, b_component);
                 out.push(p);
                 if e != 0.0 {
                     out.push(e);
