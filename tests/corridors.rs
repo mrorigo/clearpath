@@ -47,14 +47,14 @@ fn check(obstacles: &[Polygon], margin: f64, start: Point2D, goal: Point2D) {
     let clearance = clearpath::geom::clearance::Clearance::new(obstacles, WORKSPACE, margin);
     let free = |q: Point2D| clearance.is_free(q);
 
-    for i in 0..path.knots.len() {
+    for (i, &knot) in path.knots.iter().enumerate() {
         let set = admissible.get(i).unwrap();
-        assert_eq!(set.knot(), path.knots[i]);
+        assert_eq!(set.knot(), knot);
         // The zero tangent is always admissible: it is what "do nothing" means.
         assert!(set.contains(Point2D::ZERO), "set at knot {i} rejects the zero tangent");
         // Projection lands back inside, from anywhere.
         for candidate in [
-            path.knots[i] * 100.0,
+            knot * 100.0,
             Point2D::ZERO,
             Point2D::new(1e3, 1e3),
             Point2D::new(-1e3, 1e3),
