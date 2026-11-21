@@ -503,6 +503,10 @@ fn a_directed_port_is_honoured_or_the_route_is_refused() {
         }
     }
 
+    assert!(
+        routed > ITERATIONS / 2,
+        "the search routed too few requests ({routed} of {ITERATIONS}), so it is not checking directed tangents"
+    );
     println!(
         "directed: {routed} routed, {refused} refused, {ITERATIONS} queries, seed {:#x} ({})",
         seed.value, seed.source
